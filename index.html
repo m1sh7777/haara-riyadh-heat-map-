@@ -92,6 +92,21 @@
   @keyframes toastin { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
   .toast-in { animation: toastin .32s cubic-bezier(.2,.7,.3,1); }
 
+  /* --- MOBILE-ONLY instrument column collapse (≥sm always shows the full
+     column; the compact strip and the collapse chevron are <sm only).
+     Same pattern as .panel: visibility-keyed crossfade + slide. --- */
+  .col-body, .col-mini {
+    transition: opacity .26s ease, transform .34s cubic-bezier(.32,.72,.28,1), visibility .34s;
+  }
+  .col-mini { position: absolute; left: 0; bottom: 0; }
+  .col-body.off, .col-mini.off { opacity: 0; visibility: hidden; pointer-events: none; }
+  .col-body.off { transform: translateY(14px); }
+  .col-mini.off { transform: translateY(10px); }
+  @media (min-width: 640px) {
+    .col-mini { display: none !important; }
+    .col-body { opacity: 1 !important; transform: none !important; visibility: visible !important; }
+  }
+
   /* Fine film grain over everything (satellite sensor feel) */
   body::after {
     content: ""; position: fixed; inset: 0; z-index: 100; pointer-events: none; opacity: .045;
@@ -100,7 +115,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .blob, .live-dot, .ping-ring, .sel-ring, .toast-in { animation: none !important; }
-    .caret, .panel, .map-wrap, .toast-layer { transition: none !important; }
+    .caret, .panel, .map-wrap, .toast-layer, .col-body, .col-mini { transition: none !important; }
   }
 </style>
 
@@ -864,13 +879,200 @@ function ExtremeToast({ alert, onDismiss, onView }) {
 /* =====================================================================
  * THE MAP — plain SVG: night texture, screen-blended thermal blobs,
  * labels, hit targets, focus/selection rings, scale bar & north mark.
+ *
+ * MOBILE PAN/ZOOM: all map content sits inside one <g transform>, driven
+ * by {zoom, panX, panY}. Because the hit-circles themselves live inside
+ * the transformed group, the browser maps pointer/tap coordinates through
+ * the transform natively — tap-to-select, tooltips and keyboard focus
+ * rings all track correctly at any zoom/pan.
+ *
+ * Gestures (touch-first; desktop gets hidden parity via ctrl+wheel /
+ * trackpad pinch + drag-pan while zoomed — the default desktop view is
+ * the untouched fixed-fit):
+ *   · pinch (2 fingers) → zoom 1–4× anchored at the pinch midpoint
+ *   · single-finger / left-mouse drag while zoomed → pan
+ *   · double-tap while zoomed → eased reset (snap under reduced motion)
+ *   · touch-action:none on the svg claims these gestures from the browser
+ * Pan is clamped so the transformed map always covers the viewport — it
+ * can never be dragged off-screen (and 1× forces pan 0).
  * ===================================================================== */
 const ARROWS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
 
-function MapSvg({ snap, selectedId, ping, onSelect }) {
+function MapSvg({ snap, selectedId, ping, onSelect, reduced }) {
   const [hoverId, setHoverId] = useState(null);
   const [focusId, setFocusId] = useState(null);
   const [tip, setTip] = useState(null);
+
+  /* ---- pan / zoom state & gesture bookkeeping ---- */
+  const svgRef = useRef(null);
+  const [vp, setVp] = useState({ zoom: 1, x: 0, y: 0 });
+  const vpRef = useRef(vp);                       // hot ref (gesture math mid-frame)
+  const reducedRef = useRef(reduced); reducedRef.current = reduced;
+  const ptrs = useRef(new Map());                 // active pointers (id → {x,y})
+  const gest = useRef(null);                      // active gesture descriptor
+  const dragMoved = useRef(false);                // a pan/pinch happened → swallow trailing click
+  const lastTap = useRef({ t: 0, x: 0, y: 0 });   // double-tap detection
+  const animRaf = useRef(0);                      // reset tween handle
+  const isCoarse = useMemo(() => !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches), []);
+
+  const applyVp = v => { vpRef.current = v; setVp(v); };
+  const cancelTween = () => { if (animRaf.current) { cancelAnimationFrame(animRaf.current); animRaf.current = 0; } };
+
+  // viewport metrics: client-px per viewBox user-unit + client→user mapping
+  // (preserveAspectRatio "meet" letterboxes, so the offsets matter)
+  const metrics = () => {
+    const r = svgRef.current.getBoundingClientRect();
+    const s = Math.min(r.width / MAP.W, r.height / MAP.H);
+    return { r, s };
+  };
+  const toUser = (cx, cy, m) => ({
+    u: (cx - m.r.left - (m.r.width - MAP.W * m.s) / 2) / m.s,
+    v: (cy - m.r.top - (m.r.height - MAP.H * m.s) / 2) / m.s,
+  });
+
+  // pan clamp: transformed content [x, x + W·zoom] must always cover [0, W]
+  const clampVp = (z, x, y) => {
+    const zz = clamp(z, 1, 4);
+    return { zoom: zz, x: clamp(x, MAP.W * (1 - zz), 0), y: clamp(y, MAP.H * (1 - zz), 0) };
+  };
+
+  // zoom about a client point (wheel / trackpad pinch)
+  const zoomAtClient = (cx, cy, factor) => {
+    if (!svgRef.current) return;
+    const m = metrics();
+    const { u, v } = toUser(cx, cy, m);
+    const cur = vpRef.current;
+    const z = clamp(cur.zoom * factor, 1, 4);
+    const wx = (u - cur.x) / cur.zoom, wy = (v - cur.y) / cur.zoom;
+    applyVp(clampVp(z, u - z * wx, v - z * wy));
+  };
+
+  // eased return to 1× — snaps instantly under prefers-reduced-motion
+  const tweenHome = () => {
+    cancelTween();
+    if (reducedRef.current) { applyVp({ zoom: 1, x: 0, y: 0 }); return; }
+    const from = { ...vpRef.current }, t0 = performance.now(), D = 240;
+    const step = t => {
+      const k = clamp((t - t0) / D, 0, 1), e = 1 - Math.pow(1 - k, 3);
+      applyVp(clampVp(from.zoom + (1 - from.zoom) * e, from.x * (1 - e), from.y * (1 - e)));
+      animRaf.current = k < 1 ? requestAnimationFrame(step) : 0;
+    };
+    animRaf.current = requestAnimationFrame(step);
+  };
+
+  // (re)build the gesture descriptor from the pointers currently down —
+  // called on every down/up so pinch↔pan handoffs re-baseline cleanly
+  const rebuild = () => {
+    const ps = [...ptrs.current.values()];
+    if (ps.length === 0) { gest.current = null; return; }
+    const m = metrics();
+    if (ps.length >= 2) {
+      dragMoved.current = true; // a pinch must never fall through as a click
+      gest.current = {
+        mode: 'pinch', m,
+        d0: Math.max(Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y), 1),
+        z0: vpRef.current.zoom, x0: vpRef.current.x, y0: vpRef.current.y,
+        mid0: { x: (ps[0].x + ps[1].x) / 2, y: (ps[0].y + ps[1].y) / 2 },
+      };
+    } else {
+      gest.current = { mode: 'pending', m, x0: ps[0].x, y0: ps[0].y };
+    }
+  };
+
+  // window-level gesture tracking: fingers can cross UI panels mid-gesture
+  // without stalling (and pointers that started on the panels — which never
+  // bubble to the svg — are ignored via the ptrs lookup)
+  useEffect(() => {
+    const move = e => {
+      const p = ptrs.current.get(e.pointerId), g = gest.current;
+      if (!p || !g) return;
+      p.x = e.clientX; p.y = e.clientY;
+      if (g.mode === 'pinch' && ptrs.current.size >= 2) {
+        const ps = [...ptrs.current.values()];
+        const d = Math.max(Math.hypot(ps[0].x - ps[1].x, ps[0].y - ps[1].y), 1);
+        const z = clamp(g.z0 * d / g.d0, 1, 4);
+        // world point under the initial midpoint stays under the current one
+        const a = toUser(g.mid0.x, g.mid0.y, g.m);
+        const b = toUser((ps[0].x + ps[1].x) / 2, (ps[0].y + ps[1].y) / 2, g.m);
+        const wx = (a.u - g.x0) / g.z0, wy = (a.v - g.y0) / g.z0;
+        applyVp(clampVp(z, b.u - z * wx, b.v - z * wy));
+      } else if (g.mode === 'drag') {
+        const q = toUser(e.clientX, e.clientY, g.m);
+        applyVp(clampVp(vpRef.current.zoom, g.x0 + q.u - g.u0, g.y0 + q.v - g.v0));
+      } else if (g.mode === 'pending') {
+        // movement threshold separates taps (→ click/select) from drags (→ pan)
+        if (Math.hypot(e.clientX - g.x0, e.clientY - g.y0) > 8) {
+          if (vpRef.current.zoom > 1) {
+            const q = toUser(e.clientX, e.clientY, g.m);
+            gest.current = { mode: 'drag', m: g.m, u0: q.u, v0: q.v, x0: vpRef.current.x, y0: vpRef.current.y };
+            dragMoved.current = true;
+          } else {
+            gest.current = { mode: 'idle' }; // not zoomed: single-finger drag does nothing
+          }
+        }
+      }
+    };
+    const up = e => {
+      if (!ptrs.current.delete(e.pointerId)) return;
+      // double-tap (clean touch tap) → reset zoom/pan; inert at 1× so it
+      // never competes with tap-to-select
+      if (e.pointerType === 'touch' && ptrs.current.size === 0 && !dragMoved.current) {
+        const now = performance.now(), lt = lastTap.current;
+        if (now - lt.t < 320 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 30) {
+          lastTap.current = { t: 0, x: 0, y: 0 };
+          if (vpRef.current.zoom > 1.001) { dragMoved.current = true; tweenHome(); } // swallow this tap's click
+        } else {
+          lastTap.current = { t: now, x: e.clientX, y: e.clientY };
+        }
+      }
+      if (ptrs.current.size === 0) {
+        gest.current = null;
+        if (vpRef.current.zoom > 1 && vpRef.current.zoom < 1.12) tweenHome(); // settle home if barely zoomed
+      } else {
+        rebuild(); // finger lifted mid-pinch → re-baseline with those remaining
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+  }, []);
+
+  // desktop parity: ctrl+wheel / trackpad pinch zoom. Native listener with
+  // {passive:false} — React's synthetic onWheel is passive and can't
+  // preventDefault the browser's page zoom. Plain wheel is ignored, so the
+  // default desktop experience is exactly as before.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = e => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      cancelTween();
+      zoomAtClient(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0022));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  useEffect(() => () => cancelTween(), []);
+
+  const onSvgPointerDown = e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    cancelTween();
+    if (ptrs.current.size === 0) dragMoved.current = false; // fresh gesture → taps click again
+    ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    rebuild();
+  };
+
+  const onSvgClick = () => {
+    if (dragMoved.current) { dragMoved.current = false; return; } // pan/pinch just ended — not a deselect
+    onSelect(null);
+  };
 
   const handleHitKey = (e, id) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(id); return; }
@@ -965,12 +1167,16 @@ function MapSvg({ snap, selectedId, ping, onSelect }) {
     );
   }
 
+  const zoomed = vp.zoom > 1.01;
+
   return (
     <>
-      <svg viewBox="0 0 600 1000" preserveAspectRatio="xMidYMid meet" role="group"
-        aria-label={`${snap.source === 'live' ? 'Live' : 'Simulated'} satellite-style heat map of Riyadh districts`}
-        className="h-full w-full select-none" style={{ overflow: 'visible' }}
-        onClick={() => onSelect(null)}>
+      <svg ref={svgRef} viewBox="0 0 600 1000" preserveAspectRatio="xMidYMid meet" role="group"
+        aria-label={`${snap.source === 'live' ? 'Live' : 'Simulated'} satellite-style heat map of Riyadh districts${zoomed ? ` — zoomed to ${vp.zoom.toFixed(1)} times` : ''}`}
+        className="h-full w-full select-none"
+        style={{ overflow: 'visible', touchAction: 'none' }}
+        onPointerDown={onSvgPointerDown}
+        onClick={onSvgClick}>
 
         <defs>
           <filter id="heatBlur" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="6.5"/></filter>
@@ -999,84 +1205,105 @@ function MapSvg({ snap, selectedId, ping, onSelect }) {
           })}
         </defs>
 
-        <rect x="0" y="0" width="600" height="1000" fill="#060A11"/>
-        {base}
+        {/* the pan/zoom transform — hit-circles live inside it, so the
+            browser maps taps/clicks through the transform natively */}
+        <g transform={`translate(${vp.x.toFixed(2)} ${vp.y.toFixed(2)}) scale(${vp.zoom.toFixed(4)})`}>
+          <rect x="0" y="0" width="600" height="1000" fill="#060A11"/>
+          {base}
 
-        {/* urban heat dome */}
-        <ellipse cx="300" cy="570" rx="255" ry="335" fill="url(#ambG)" style={{ mixBlendMode: 'screen' }} pointerEvents="none"/>
+          {/* urban heat dome */}
+          <ellipse cx="300" cy="570" rx="255" ry="335" fill="url(#ambG)" style={{ mixBlendMode: 'screen' }} pointerEvents="none"/>
 
-        {/* thermal layer — screen-blended so overlapping heat blooms hotter, like real thermal imaging */}
-        <g style={{ mixBlendMode: 'screen' }} pointerEvents="none">
-          {GEO.map((g, i) => {
-            const emph = hoverId === g.id || selectedId === g.id;
-            const dim = selectedId && selectedId !== g.id;
-            return (
-              <circle key={g.id} cx={g.x} cy={g.y} r={g.r} fill={`url(#hg-${g.id})`} filter="url(#heatBlur)"
-                className="blob" style={{
-                  opacity: emph ? 1 : (dim ? 0.5 : 0.82),
-                  animationDuration: `${(7 + (i % 5) * 1.3).toFixed(1)}s`,
-                  animationDelay: `${(-(i * 1.17)).toFixed(1)}s`,
-                }}/>
-            );
-          })}
+          {/* thermal layer — screen-blended so overlapping heat blooms hotter, like real thermal imaging */}
+          <g style={{ mixBlendMode: 'screen' }} pointerEvents="none">
+            {GEO.map((g, i) => {
+              const emph = hoverId === g.id || selectedId === g.id;
+              const dim = selectedId && selectedId !== g.id;
+              return (
+                <circle key={g.id} cx={g.x} cy={g.y} r={g.r} fill={`url(#hg-${g.id})`} filter="url(#heatBlur)"
+                  className="blob" style={{
+                    opacity: emph ? 1 : (dim ? 0.5 : 0.82),
+                    animationDuration: `${(7 + (i % 5) * 1.3).toFixed(1)}s`,
+                    animationDelay: `${(-(i * 1.17)).toFixed(1)}s`,
+                  }}/>
+              );
+            })}
+          </g>
+
+          <rect x="0" y="0" width="600" height="1000" fill="url(#vig)" pointerEvents="none"/>
+
+          {/* labels + center crosshair marks */}
+          <g className="svg-mono" pointerEvents="none">
+            {GEO.map(g => {
+              const emph = hoverId === g.id || selectedId === g.id;
+              const dim = selectedId && selectedId !== g.id;
+              const p = labelPos(g);
+              return (
+                <g key={g.id}>
+                  <text x={p.x} y={p.y} textAnchor={p.a} fontSize="9.5" letterSpacing="1.5"
+                    fill={emph ? '#F2F6FA' : '#93A1B2'} opacity={emph ? 1 : (dim ? 0.32 : 0.62)}
+                    stroke="#060A11" strokeWidth="2.2" paintOrder="stroke" strokeLinejoin="round">
+                    {g.name.toUpperCase()}
+                  </text>
+                  <path d={`M${(g.x - 3.2).toFixed(1)} ${g.y.toFixed(1)}h6.4M${g.x.toFixed(1)} ${(g.y - 3.2).toFixed(1)}v6.4`}
+                    stroke="#E9EEF4" strokeWidth="0.9" opacity={emph ? 0.95 : 0.38} fill="none"/>
+                </g>
+              );
+            })}
+          </g>
+
+          {/* hit targets (keyboard-focusable, drawn above everything visual) */}
+          <g>
+            {GEO.map(g => {
+              const rec = snap.byId[g.id];
+              return (
+                <circle key={g.id} ref={el => { HIT_EL[g.id] = el; }}
+                  cx={g.x} cy={g.y} r={g.r * 0.85} fill="transparent"
+                  className="hitcircle" tabIndex={0} role="button"
+                  aria-label={`${g.name}: ${rec.temp.toFixed(1)} degrees Celsius, ${SEV[rec.sev].label.toLowerCase()}`}
+                  onClick={e => {
+                    e.stopPropagation();
+                    if (dragMoved.current) { dragMoved.current = false; return; } // pan/pinch release — not a select
+                    onSelect(g.id);
+                  }}
+                  onKeyDown={e => handleHitKey(e, g.id)}
+                  onFocus={() => setFocusId(g.id)}
+                  onBlur={() => setFocusId(f => (f === g.id ? null : f))}
+                  onPointerEnter={e => { if (e.pointerType !== 'touch') setHoverId(g.id); }}
+                  onPointerLeave={() => { setHoverId(h => (h === g.id ? null : h)); setTip(null); }}
+                  onPointerMove={e => { if (e.pointerType === 'mouse' && !dragMoved.current) setTip({ x: e.clientX, y: e.clientY, id: g.id }); }}
+                />
+              );
+            })}
+          </g>
+
+          {/* keyboard focus ring, selection ring, locating ping */}
+          <g pointerEvents="none">
+            {focG && <circle cx={focG.x} cy={focG.y} r={focG.r * 1.08} fill="none" stroke="rgba(216,162,75,0.85)" strokeWidth="1" strokeDasharray="5 7"/>}
+            {selG && <circle className="sel-ring" cx={selG.x} cy={selG.y} r={selG.r * 1.18} fill="none" stroke="rgba(238,243,248,0.7)" strokeWidth="1" strokeDasharray="4 7"/>}
+            {pingG && <circle key={ping.at} className="ping-ring" cx={pingG.x} cy={pingG.y} r={pingG.r * 1.28} fill="none" stroke="#EEF3F8" strokeWidth="1.3"/>}
+          </g>
         </g>
 
-        <rect x="0" y="0" width="600" height="1000" fill="url(#vig)" pointerEvents="none"/>
-
-        {/* timestamp burn-in while scrubbing (satellite-frame style) */}
+        {/* timestamp burn-in while scrubbing (satellite-frame style) —
+            HUD element, pinned to the frame rather than panning with the map */}
         {snap.scrubbed && (
           <text x="300" y="26" textAnchor="middle" fontSize="8" letterSpacing="3" fill="#8FA2B8" opacity="0.5"
             className="svg-mono" pointerEvents="none">{`${snap.source === 'live' ? 'FORECAST' : 'MODEL'} ${hhmm(snap.hour)} AST`}</text>
         )}
-
-        {/* labels + center crosshair marks */}
-        <g className="svg-mono" pointerEvents="none">
-          {GEO.map(g => {
-            const emph = hoverId === g.id || selectedId === g.id;
-            const dim = selectedId && selectedId !== g.id;
-            const p = labelPos(g);
-            return (
-              <g key={g.id}>
-                <text x={p.x} y={p.y} textAnchor={p.a} fontSize="9.5" letterSpacing="1.5"
-                  fill={emph ? '#F2F6FA' : '#93A1B2'} opacity={emph ? 1 : (dim ? 0.32 : 0.62)}
-                  stroke="#060A11" strokeWidth="2.2" paintOrder="stroke" strokeLinejoin="round">
-                  {g.name.toUpperCase()}
-                </text>
-                <path d={`M${(g.x - 3.2).toFixed(1)} ${g.y.toFixed(1)}h6.4M${g.x.toFixed(1)} ${(g.y - 3.2).toFixed(1)}v6.4`}
-                  stroke="#E9EEF4" strokeWidth="0.9" opacity={emph ? 0.95 : 0.38} fill="none"/>
-              </g>
-            );
-          })}
-        </g>
-
-        {/* hit targets (keyboard-focusable, drawn above everything visual) */}
-        <g>
-          {GEO.map(g => {
-            const rec = snap.byId[g.id];
-            return (
-              <circle key={g.id} ref={el => { HIT_EL[g.id] = el; }}
-                cx={g.x} cy={g.y} r={g.r * 0.85} fill="transparent"
-                className="hitcircle" tabIndex={0} role="button"
-                aria-label={`${g.name}: ${rec.temp.toFixed(1)} degrees Celsius, ${SEV[rec.sev].label.toLowerCase()}`}
-                onClick={e => { e.stopPropagation(); onSelect(g.id); }}
-                onKeyDown={e => handleHitKey(e, g.id)}
-                onFocus={() => setFocusId(g.id)}
-                onBlur={() => setFocusId(f => (f === g.id ? null : f))}
-                onPointerEnter={e => { if (e.pointerType !== 'touch') setHoverId(g.id); }}
-                onPointerLeave={() => { setHoverId(h => (h === g.id ? null : h)); setTip(null); }}
-                onPointerMove={e => { if (e.pointerType === 'mouse') setTip({ x: e.clientX, y: e.clientY, id: g.id }); }}
-              />
-            );
-          })}
-        </g>
-
-        {/* keyboard focus ring, selection ring, locating ping */}
-        <g pointerEvents="none">
-          {focG && <circle cx={focG.x} cy={focG.y} r={focG.r * 1.08} fill="none" stroke="rgba(216,162,75,0.85)" strokeWidth="1" strokeDasharray="5 7"/>}
-          {selG && <circle className="sel-ring" cx={selG.x} cy={selG.y} r={selG.r * 1.18} fill="none" stroke="rgba(238,243,248,0.7)" strokeWidth="1" strokeDasharray="4 7"/>}
-          {pingG && <circle key={ping.at} className="ping-ring" cx={pingG.x} cy={pingG.y} r={pingG.r * 1.28} fill="none" stroke="#EEF3F8" strokeWidth="1.3"/>}
-        </g>
       </svg>
+
+      {/* zoom readout + reset — visible affordance on coarse-pointer (touch)
+          devices only; desktop parity stays hidden (ctrl+wheel to zoom out) */}
+      {isCoarse && zoomed && (
+        <button type="button" onClick={tweenHome}
+          aria-label={`Reset map zoom — currently ${vp.zoom.toFixed(1)} times`}
+          className="fixed z-[45] right-3 top-[136px] sm:top-[92px] glass rounded-full h-[44px] px-4 flex items-center gap-2 font-mono text-[11px] tabular-nums select-none">
+          <span className="text-[#D8A24B]">{vp.zoom.toFixed(1)}×</span>
+          <span className="tracking-[0.18em] text-slate-400">RESET</span>
+        </button>
+      )}
+
       {tipEl}
     </>
   );
@@ -1552,6 +1779,7 @@ function App() {
   const [ping, setPing] = useState(null);
   const [scrubHour, setScrubHour] = useState(null); // null → live; [0,24) → 24h scrub view
   const [playing, setPlaying] = useState(false);
+  const [colMin, setColMin] = useState(false);      // mobile-only: instrument column collapsed
   const reduced = useReducedMotion();
   const clock = useRiyadhClock();
 
@@ -1609,18 +1837,45 @@ function App() {
   return (
     <div className="h-full">
       <div className={`map-wrap fixed inset-0 z-0 flex items-center justify-center ${selectedId ? 'panel-open' : ''}`}>
-        <MapSvg snap={view} selectedId={selectedId} ping={ping} onSelect={handleSelect}/>
+        <MapSvg snap={view} selectedId={selectedId} ping={ping} onSelect={handleSelect} reduced={reduced}/>
       </div>
       <TopBar clock={clock} snap={view} onSelect={handleSelect} feed={feed}
         model={scrubHour == null ? null : hhmm(scrubHour)}/>
 
-      {/* left instrument column: source toggle, 24h scrubber, legend */}
-      <div className="fixed left-3 bottom-3 sm:left-5 sm:bottom-5 z-40 flex flex-col items-start gap-3 pointer-events-none">
-        <SourceToggle feed={feed} updated={liveSnap.updated} onMode={handleMode}/>
-        <TimeScrubber view={view} liveHour={liveSnap.hour} dataT={liveSnap.t} scrubbed={scrubHour != null}
-          playing={playing} reduced={reduced}
-          onScrub={handleScrubTime} onLive={handleLive} onPlaying={setPlaying}/>
-        <Legend snap={view} selectedId={selectedId}/>
+      {/* left instrument column: source toggle, 24h scrubber, legend.
+          MOBILE ONLY: collapsible to a compact strip (chevron, 44px targets);
+          ≥sm always renders the full column, unaffected by colMin. The
+          collapse state is fully independent of map zoom/pan. */}
+      <div className="fixed left-3 bottom-3 sm:left-5 sm:bottom-5 z-40 pointer-events-none">
+        {/* compact strip (mobile, collapsed) — live mean + status + expand */}
+        <div className={`col-mini ${colMin ? '' : 'off'}`}>
+          <button type="button" onClick={() => setColMin(false)} aria-expanded="false"
+            aria-label="Expand instrument panel"
+            className="pointer-events-auto glass rounded-full h-[44px] pl-4 pr-3 flex items-center gap-2.5 select-none">
+            <span className="font-mono text-[14px] tabular-nums leading-none" style={{ color: rampColor(view.mean) }}>{view.mean.toFixed(1)}°</span>
+            <span className="font-mono text-[8px] tracking-[0.22em] text-slate-500 leading-none">MEAN</span>
+            <span className="font-mono text-[8px] tracking-[0.14em] text-slate-600 leading-none">
+              {view.scrubbed
+                ? `${view.source === 'live' ? 'FCST' : 'MODEL'} ${hhmm(view.hour)}`
+                : (view.source === 'live' ? 'LIVE' : 'SIM')}
+            </span>
+            <span className="ml-0.5 text-slate-400"><I n="chevup" size={15}/></span>
+          </button>
+        </div>
+
+        {/* full column (always visible ≥sm) */}
+        <div className={`col-body ${colMin ? 'off' : ''} flex flex-col items-start gap-3 pointer-events-none`}>
+          <button type="button" onClick={() => setColMin(true)} aria-expanded="true"
+            aria-label="Collapse instrument panel"
+            className="sm:hidden self-end pointer-events-auto w-[44px] h-[44px] rounded-full glass flex items-center justify-center text-slate-400 hover:text-slate-100 transition-colors">
+            <I n="chevdown" size={16}/>
+          </button>
+          <SourceToggle feed={feed} updated={liveSnap.updated} onMode={handleMode}/>
+          <TimeScrubber view={view} liveHour={liveSnap.hour} dataT={liveSnap.t} scrubbed={scrubHour != null}
+            playing={playing} reduced={reduced}
+            onScrub={handleScrubTime} onLive={handleLive} onPlaying={setPlaying}/>
+          <Legend snap={view} selectedId={selectedId}/>
+        </div>
       </div>
 
       {/* extreme-heat alert toast — top-center below the header, shifts
