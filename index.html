@@ -89,6 +89,13 @@
   .toast-layer { transition: padding .5s cubic-bezier(.32,.72,.28,1); }
   @media (min-width: 768px) { .toast-layer.panel-open { padding-right: 380px; } }
 
+  /* Authorship credit — fixed corner furniture, non-interactive. With the
+     readout panel open it slides clear on desktop (in step with the map)
+     and fades out on mobile, where the bottom sheet owns that corner. */
+  .madeby { transition: transform .5s cubic-bezier(.32,.72,.28,1), opacity .3s ease; }
+  @media (max-width: 767px) { .madeby.panel-open { opacity: 0; } }
+  @media (min-width: 768px) { .madeby.panel-open { transform: translateX(-380px); } }
+
   @keyframes toastin { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
   .toast-in { animation: toastin .32s cubic-bezier(.2,.7,.3,1); }
 
@@ -115,7 +122,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .blob, .live-dot, .ping-ring, .sel-ring, .toast-in { animation: none !important; }
-    .caret, .panel, .map-wrap, .toast-layer, .col-body, .col-mini { transition: none !important; }
+    .caret, .panel, .map-wrap, .toast-layer, .col-body, .col-mini, .madeby { transition: none !important; }
   }
 </style>
 
@@ -1883,6 +1890,15 @@ function App() {
       <div className={`toast-layer fixed inset-0 z-[65] flex justify-center items-start pointer-events-none pt-[136px] sm:pt-[92px] ${selectedId ? 'panel-open' : ''}`}>
         {alertToast && <ExtremeToast alert={alertToast} onDismiss={dismissAlert} onView={handleToastView}/>}
       </div>
+
+      {/* authorship credit — bottom-right corner furniture: sits below the
+          map's scale bar / north mark at every viewport geometry, slides left
+          of the readout panel on desktop when it opens (in step with the map),
+          and fades out on mobile where the bottom sheet owns that corner.
+          Non-interactive so it never blocks map hit targets. */}
+      <p className={`madeby fixed bottom-2 right-3 z-30 font-mono text-[9px] tracking-[0.16em] text-slate-600 leading-none pointer-events-none select-none ${selectedId ? 'panel-open' : ''}`}>
+        MADE BY MESH3AL
+      </p>
 
       <InfoPanel snap={view} selectedId={selectedId} onClose={() => setSelectedId(null)} onLive={handleLive}/>
     </div>
