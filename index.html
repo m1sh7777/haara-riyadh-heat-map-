@@ -1,0 +1,1640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="color-scheme" content="dark"/>
+<meta name="theme-color" content="#070B10"/>
+<meta name="description" content="Haara — an interactive satellite-style heat map of Riyadh. Live Open-Meteo observations and hourly forecast per district, simulated model fallback, and extreme-heat alerts."/>
+<title>Haara · Riyadh Heat Map</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23E97E32' opacity='.25'/%3E%3Ccircle cx='16' cy='16' r='9' fill='%23E97E32'/%3E%3C/svg%3E"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans+Arabic:wght@400;500&display=swap" rel="stylesheet"/>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      fontFamily: {
+        sans: ['"Space Grotesk"', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'monospace'],
+        ar: ['"IBM Plex Sans Arabic"', 'sans-serif'],
+      }
+    }}
+  };
+</script>
+
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #070B10; color: #C7D0DC;
+    font-family: 'Space Grotesk', sans-serif;
+    overflow: hidden; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: rgba(216,162,75,.28); color: #fff; }
+
+  /* Frosted glass chrome (search / legend / panel / scrubber / toggle / toast) */
+  .glass {
+    background: rgba(10,16,24,.6);
+    backdrop-filter: blur(16px) saturate(1.25);
+    -webkit-backdrop-filter: blur(16px) saturate(1.25);
+    border: 1px solid rgba(255,255,255,.07);
+  }
+  .svg-mono { font-family: 'JetBrains Mono', monospace; }
+
+  .scroll-thin { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.14) transparent; }
+  .scroll-thin::-webkit-scrollbar { width: 5px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 3px; }
+
+  /* Keyboard focus: visible amber ring on all HTML controls */
+  :focus-visible { outline: 1px solid rgba(216,162,75,.9); outline-offset: 2px; }
+  .hitcircle { cursor: pointer; touch-action: manipulation; }
+  .hitcircle:focus, .hitcircle:focus-visible { outline: none; } /* SVG focus drawn as a ring inside the map */
+
+  /* 24-hour scrubber bar + source toggle (docked in the left instrument column).
+     Mobile: full width; ≥sm: capped, and always clears the right-hand panel. */
+  .scrubber-bar { width: calc(100vw - 24px); }
+  @media (min-width: 640px) { .scrubber-bar { width: min(420px, calc(100vw - 400px)); } }
+
+  /* --- restrained motion --- */
+  @keyframes breathe { from { transform: scale(1); } to { transform: scale(1.05); } }
+  .blob { transform-box: fill-box; transform-origin: center; animation: breathe 8s ease-in-out infinite alternate; }
+
+  @keyframes livepulse {
+    0%   { box-shadow: 0 0 0 0 rgba(216,162,75,.5); }
+    70%  { box-shadow: 0 0 0 7px rgba(216,162,75,0); }
+    100% { box-shadow: 0 0 0 0 rgba(216,162,75,0); }
+  }
+  .live-dot { animation: livepulse 2.2s ease-out infinite; }
+
+  @keyframes pingx { 0% { transform: scale(.3); opacity: .9; } 100% { transform: scale(1.5); opacity: 0; } }
+  .ping-ring { transform-box: fill-box; transform-origin: center; animation: pingx 1s cubic-bezier(.2,.7,.3,1) forwards; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .sel-ring { transform-box: fill-box; transform-origin: center; animation: spin 28s linear infinite; }
+
+  .caret { transition: left .8s cubic-bezier(.4,0,.2,1); }
+
+  .panel { transition: transform .42s cubic-bezier(.32,.72,.28,1), visibility .42s; }
+  .panel.closed { visibility: hidden; pointer-events: none; }
+  @media (max-width: 767px) { .panel.closed { transform: translateY(calc(100% + 16px)); } }
+  @media (min-width: 768px) { .panel.closed { transform: translateX(calc(100% + 24px)); } }
+
+  .map-wrap { transition: padding .5s cubic-bezier(.32,.72,.28,1); }
+  @media (min-width: 768px) { .map-wrap.panel-open { padding-right: 380px; } }
+
+  /* Extreme-heat toast layer: centered below the header, and shifts clear of
+     the right-hand readout panel on desktop exactly like the map does. */
+  .toast-layer { transition: padding .5s cubic-bezier(.32,.72,.28,1); }
+  @media (min-width: 768px) { .toast-layer.panel-open { padding-right: 380px; } }
+
+  @keyframes toastin { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+  .toast-in { animation: toastin .32s cubic-bezier(.2,.7,.3,1); }
+
+  /* Fine film grain over everything (satellite sensor feel) */
+  body::after {
+    content: ""; position: fixed; inset: 0; z-index: 100; pointer-events: none; opacity: .045;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .blob, .live-dot, .ping-ring, .sel-ring, .toast-in { animation: none !important; }
+    .caret, .panel, .map-wrap, .toast-layer { transition: none !important; }
+  }
+</style>
+
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback, useSyncExternalStore } = React;
+
+/* =====================================================================
+ * GEOGRAPHY — 20 real Riyadh districts with approximate lat/lng,
+ * projected to SVG coordinates in true km proportion (viewBox 600x1000).
+ * Districts are laid out by their real relative geography.
+ * ===================================================================== */
+const MAP = { latMax: 24.895, latMin: 24.52, lngMin: 46.545, lngMax: 46.79, W: 600, H: 1000 };
+const px = lng => (lng - MAP.lngMin) / (MAP.lngMax - MAP.lngMin) * MAP.W;
+const py = lat => (MAP.latMax - lat) / (MAP.latMax - MAP.latMin) * MAP.H;
+
+const DISTRICTS = [
+  // hi  = urban-heat-island offset (dense core runs hotter than the desert edge)
+  // amp = diurnal swing (bare desert swings harder than built-up core)
+  // r   = heat-blob radius, lp = label placement: b(elow) a(bove) l(eft) r(ight)
+  { id:'olaya',     name:'Olaya',              ar:'العليا',        lat:24.692, lng:46.685, r:56, hi:2.7, amp:3.0, wdir:'NW', lp:'l' },
+  { id:'sulimani',  name:'Al Sulimaniyah',     ar:'السليمانية',    lat:24.686, lng:46.705, r:46, hi:2.3, amp:3.0, wdir:'N',  lp:'r', alt:['sulaimaniyah','sulaymaniyah'] },
+  { id:'malaz',     name:'Al Malaz',           ar:'الملز',         lat:24.663, lng:46.718, r:50, hi:2.1, amp:3.2, wdir:'NE', lp:'b', ldy:-6 },
+  { id:'bathaa',    name:'Al Bathaa',          ar:'البطحاء',       lat:24.632, lng:46.712, r:56, hi:3.4, amp:3.0, wdir:'NW', dusty:true, lp:'b', alt:['batha','al batha'] },
+  { id:'aziziyah',  name:'Al Aziziyah',        ar:'العزيزية',      lat:24.595, lng:46.735, r:56, hi:1.6, amp:4.2, wdir:'NE', dusty:true, lp:'b' },
+  { id:'shifa',     name:'Ash Shifa',          ar:'الشفا',         lat:24.555, lng:46.700, r:62, hi:1.2, amp:4.6, wdir:'N',  dusty:true, lp:'b', alt:['al shifa','shafa'] },
+  { id:'rawdah',    name:'Al Rawdah',          ar:'الروضة',        lat:24.724, lng:46.752, r:54, hi:1.3, amp:3.8, wdir:'NE', lp:'a' },
+  { id:'qurtubah',  name:'Qurtubah',           ar:'قرطبة',         lat:24.804, lng:46.724, r:54, hi:0.9, amp:4.0, wdir:'NE', lp:'b', alt:['qurtoba'] },
+  { id:'narjis',    name:'Al Narjis',          ar:'النرجس',        lat:24.838, lng:46.663, r:48, hi:0.8, amp:4.2, wdir:'N',  lp:'b', alt:['narjes'] },
+  { id:'ishbiliyah',name:'Ishbiliyah',         ar:'الإسبانية',     lat:24.826, lng:46.698, r:48, hi:0.7, amp:4.2, wdir:'N',  lp:'b' },
+  { id:'yasmin',    name:'Al Yasmin',          ar:'الياسمين',      lat:24.826, lng:46.636, r:50, hi:0.7, amp:4.6, wdir:'NW', lp:'b' },
+  { id:'muruj',     name:'Al Muruj',           ar:'المروج',        lat:24.752, lng:46.678, r:50, hi:1.7, amp:3.4, wdir:'N',  lp:'b' },
+  { id:'kfahd',     name:'King Fahd District', ar:'حي الملك فهد',  lat:24.772, lng:46.672, r:42, hi:1.9, amp:3.0, wdir:'NW', lp:'r', ldy:-6, alt:['king fahd','malik fahd'] },
+  { id:'hittin',    name:'Hittin',             ar:'حطين',          lat:24.790, lng:46.625, r:50, hi:0.6, amp:4.6, wdir:'NW', lp:'l' },
+  { id:'nakheel',   name:'Al Nakheel',         ar:'النخيل',        lat:24.736, lng:46.638, r:48, hi:0.5, amp:3.8, wdir:'NW', lp:'l' },
+  { id:'kafd',      name:'KAFD',               ar:'المركز المالي', lat:24.763, lng:46.620, r:38, hi:3.0, amp:2.8, wdir:'NW', lp:'l', ldy:12, alt:['financial district','king abdullah financial district'] },
+  { id:'wurud',     name:'Al Wurud',           ar:'الورود',        lat:24.712, lng:46.664, r:46, hi:1.5, amp:3.3, wdir:'NW', lp:'l', alt:['worud','al worud'] },
+  { id:'diriyah',   name:'Diriyah',            ar:'الدرعية',       lat:24.738, lng:46.575, r:60, hi:0.3, amp:6.2, wdir:'NW', lp:'b', alt:['ad diriyah','diriyya'] },
+  { id:'dlaban',    name:'Dhahrat Laban',      ar:'ظهره لبن',      lat:24.612, lng:46.612, r:56, hi:0.5, amp:5.6, wdir:'NW', dusty:true, lp:'a', alt:['dhahrat laban','zahrat laban'] },
+  { id:'namar',     name:'Namar',              ar:'نمار',          lat:24.580, lng:46.600, r:60, hi:0.4, amp:5.8, wdir:'NW', dusty:true, lp:'b' },
+];
+
+const GEO = DISTRICTS.map(d => ({ ...d, x: px(d.lng), y: py(d.lat) }));
+const GEO_BY_ID = {}; GEO.forEach(g => GEO_BY_ID[g.id] = g);
+const HIT_EL = {}; // registry of focusable hit-circles (for search / focus return)
+
+/* =====================================================================
+ * TEMPERATURE COLOR SCALE — blue → petrol → amber → orange → red
+ * ===================================================================== */
+const T_MIN = 30, T_MAX = 45;
+const RAMP = [
+  [0.00, [59, 116, 184]],   // blue
+  [0.25, [67, 144, 159]],   // petrol (cool hand-off)
+  [0.50, [216, 162, 75]],   // amber
+  [0.75, [233, 126, 50]],   // orange
+  [1.00, [224, 72, 46]],    // red
+];
+const RAMP_CSS = 'linear-gradient(90deg,#3B74B8 0%,#43909F 25%,#D8A24B 50%,#E97E32 75%,#E0482E 100%)';
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rgba = (rgbStr, a) => rgbStr.replace('rgb(', 'rgba(').replace(/\)$/, `, ${a})`);
+
+const hhmm = h => `${String(Math.floor(h) % 24).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
+const QH = 1 / 12; // scrub resolution: 5 minutes
+const qz = h => { const w = ((h % 24) + 24) % 24; return (Math.round(w / QH) * QH) % 24; };
+
+function rampColor(t) {
+  const u = clamp((t - T_MIN) / (T_MAX - T_MIN), 0, 1);
+  let i = 0;
+  while (i < RAMP.length - 2 && u > RAMP[i + 1][0]) i++;
+  const [p0, c0] = RAMP[i], [p1, c1] = RAMP[i + 1];
+  const f = (u - p0) / (p1 - p0);
+  const c = c0.map((v, k) => Math.round(v + (c1[k] - v) * f));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+const SEV = {
+  moderate: { label: 'MODERATE',     color: '#6FA7BE', range: '< 38°'  },
+  high:     { label: 'HIGH HEAT',    color: '#D8A24B', range: '38 – 43°' },
+  extreme:  { label: 'EXTREME HEAT', color: '#E0522E', range: '≥ 43°'  },
+};
+
+// Extreme-heat ALERT threshold, °C — deliberately one notch above the EXTREME
+// severity badge (≥ 43°): the badge is a category, the alert is an actionable
+// warning. Absolute (not seasonal) by design: 44° is extreme in any month.
+// Lower it temporarily (e.g. to current temps) to see the toast fire.
+const ALERT_T = 44;
+
+/* =====================================================================
+ * SHARED TIME UTILITIES (Asia/Riyadh) + compass — used by both feeds
+ * ===================================================================== */
+const riyadhDateFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Riyadh', weekday: 'short', day: '2-digit', month: 'short' });
+const riyadhTimeFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Riyadh', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+const riyadhHourOf = now => {
+  const p = riyadhTimeFmt.formatToParts(now);
+  const get = t => +p.find(x => x.type === t).value;
+  return get('hour') + get('minute') / 60 + get('second') / 3600;
+};
+const COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+const compassOf = deg => COMPASS[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16];
+
+/* =====================================================================
+ * NIGHT TEXTURE — stylized ring roads, highway spines, Wadi Hanifah
+ * and a deterministic scatter of city lights (black-marble style).
+ * ===================================================================== */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function smoothPath(pts) {
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
+    d += ` C ${(p1[0] + (p2[0] - p0[0]) / 6).toFixed(1)} ${(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)}, ${(p2[0] - (p3[0] - p1[0]) / 6).toFixed(1)} ${(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)}, ${p2[0]} ${p2[1]}`;
+  }
+  return d;
+}
+
+const ROADS = [ // key arteries: King Fahd Rd spine, Olaya St, Makkah Rd, Northern & Eastern Rings
+  { pts: [[296, 66], [308, 250], [318, 400], [334, 560], [350, 730], [360, 952]],  w: 1.2, o: 0.16 },
+  { pts: [[256, 110], [272, 260], [290, 420], [308, 560], [326, 700], [348, 905]], w: 1.0, o: 0.11 },
+  { pts: [[26, 650], [150, 666], [300, 678], [440, 686], [578, 694]],              w: 1.1, o: 0.13 },
+  { pts: [[42, 292], [180, 278], [320, 274], [455, 280], [578, 302]],              w: 1.0, o: 0.12 },
+  { pts: [[556, 66], [562, 250], [567, 450], [572, 650], [578, 860], [584, 956]],  w: 1.1, o: 0.14 },
+];
+const RING_PATHS = [ // inner + middle ring road loops around the old core
+  'M 322 560 H 400 Q 422 560 422 582 V 708 Q 422 730 400 730 H 322 Q 300 730 300 708 V 582 Q 300 560 322 560',
+  'M 212 462 H 438 Q 470 462 470 494 V 756 Q 470 788 438 788 H 212 Q 180 788 180 756 V 494 Q 180 462 212 462',
+];
+const WADI = 'M 44 170 C 58 250 42 320 56 395 C 70 470 48 540 60 610 C 72 680 54 760 64 830 C 70 880 60 920 68 955';
+
+const LIGHTS = (() => {
+  const rng = mulberry32(20240715);
+  const gauss = () => { let u = 0, v = 0; while (!u) u = rng(); while (!v) v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  const dots = [];
+  GEO.forEach(g => {
+    const n = Math.round(10 + g.hi * 11 + g.r * 0.16); // denser core = more lights
+    for (let i = 0; i < n; i++) {
+      const a = rng() * 2 * Math.PI, d = Math.abs(gauss()) * g.r * 0.4;
+      dots.push({ x: g.x + Math.cos(a) * d, y: g.y + Math.sin(a) * d, r: 0.5 + rng() * 0.8, o: 0.05 + rng() * 0.22, c: rng() < 0.82 ? '#FFD9A6' : '#C4D6E6' });
+    }
+  });
+  ROADS.forEach(rd => {
+    for (let i = 0; i < rd.pts.length - 1; i++) {
+      const [x1, y1] = rd.pts[i], [x2, y2] = rd.pts[i + 1];
+      const len = Math.hypot(x2 - x1, y2 - y1), n = Math.max(1, Math.round(len / 13));
+      for (let k = 0; k < n; k++) {
+        if (rng() > 0.5) continue;
+        const t = (k + 0.5) / n;
+        dots.push({ x: x1 + (x2 - x1) * t + (rng() - 0.5) * 8, y: y1 + (y2 - y1) * t + (rng() - 0.5) * 8, r: 0.4 + rng() * 0.7, o: 0.04 + rng() * 0.16, c: '#FFD9A6' });
+      }
+    }
+  });
+  return dots;
+})();
+
+/* =====================================================================
+ * DATA LAYER — two interchangeable providers behind one interface,
+ * switched by a small controller.
+ *
+ *   Provider interface (identical for both):
+ *     subscribe(cb) → unsub    called whenever the provider's snapshot changes
+ *     getSnapshot() → snap     { t, hour, updated, districts[], byId{},
+ *                                mean, peak, scrubbed, source, stale }
+ *     project(hour) → snap     24-hour scrub view at hour-of-day `hour`
+ *     meanCurve() → number[49] city-mean values at scrub positions 0..24
+ *     modelCurve(g,h,off)      per-district 24h curve for the panel sparkline
+ *     nextExtreme(T) → {id,temp,at,hour} | null
+ *                               earliest upcoming crossing of T in the next
+ *                               24 h — powers the extreme-heat early warning
+ *     hasData() · status()
+ *
+ *   · SIMULATED provider — deterministic thermal model (fallback +
+ *     comparison mode). Clearly labeled everywhere as simulated.
+ *   · OPEN-METEO provider — real data, no API key (see its header).
+ *
+ * To point at a different backend later, write a third function that
+ * returns this same shape — nothing else in the app changes.
+ * ===================================================================== */
+
+/* ---------------- Provider 1 · SIMULATED (not live data) ------------- */
+function createSimulatedSource() {
+  /* *** SIMULATED, NOT LIVE DATA ***
+   * Seasonal baseline + per-district diurnal swing (cosine peaking
+   * ~15:15 local) + urban-heat-island offset + slow random walk.
+   * Kept as the fallback whenever live data is unavailable, and as an
+   * explicit comparison mode in the SOURCE toggle. */
+  const SEASONAL = 36.2;
+  const PEAK_H = 15.25;
+  const TICK_MS = 4000;
+  const MEAN_AMP = GEO.reduce((a, g) => a + g.amp, 0) / GEO.length;
+  const MEAN_HI  = GEO.reduce((a, g) => a + g.hi, 0) / GEO.length;
+
+  const diurnal = h => Math.cos((h - PEAK_H) / 24 * 2 * Math.PI);
+  const modelTemp = (g, h) => SEASONAL + diurnal(h) * g.amp + g.hi;
+
+  const rng = mulberry32(1403);
+  const pickSky = g => (g.dusty
+    ? ['Clear', 'Haze', 'Haze', 'Dust haze', 'Blowing dust']
+    : ['Clear', 'Clear', 'Clear', 'Haze', 'Few clouds'])[Math.floor(rng() * 5)];
+
+  const state = GEO.map(g => ({ g, tw: (rng() - 0.5) * 0.8, rw: (rng() - 0.5) * 8, ww: (rng() - 0.5) * 6, sky: pickSky(g) }));
+
+  let snap = null;
+  const subs = new Set();
+
+  function readout(s, h) {
+    const dn = diurnal(h);
+    const temp = modelTemp(s.g, h) + s.tw;
+    const rh = Math.round(clamp(24 - 11 * dn + s.rw, 5, 48));
+    const wind = Math.round(clamp(10 + 4 * Math.abs(dn) + s.ww, 3, 38));
+    const feels = clamp(temp + 1.4 * Math.max(0, dn) + 0.06 * (rh - 22) - 0.15 * (wind - 10), temp - 1.5, temp + 3.2);
+    const sev = temp < 38 ? 'moderate' : temp < 43 ? 'high' : 'extreme';
+    const trend = -s.g.amp * (Math.PI / 12) * Math.sin((h - PEAK_H) / 24 * 2 * Math.PI);
+    return { id: s.g.id, temp, feels, rh, wind, windDir: s.g.wdir, sky: s.sky, sev, tw: s.tw, trend };
+  }
+
+  function build(hour, now, updated, scrubbed) {
+    const districts = state.map(s => readout(s, hour));
+    const byId = {}; districts.forEach(d => byId[d.id] = d);
+    return { t: now, hour, updated, districts, byId, scrubbed, source: 'sim', stale: false,
+      mean: districts.reduce((a, d) => a + d.temp, 0) / districts.length,
+      peak: districts.reduce((a, d) => d.temp > a.temp ? d : a, districts[0]) };
+  }
+
+  function step() {
+    const now = Date.now();
+    const h = riyadhHourOf(now);
+    state.forEach(s => {
+      // small random walks — the "live-feeling" drift
+      s.tw = clamp(s.tw * 0.96 + (rng() - 0.5) * 0.3, -1.4, 1.4);
+      s.rw = clamp(s.rw * 0.97 + (rng() - 0.5) * 1.8, -7, 7);
+      s.ww = clamp(s.ww * 0.97 + (rng() - 0.5) * 1.6, -9, 9);
+      if (rng() < 0.025) s.sky = pickSky(s.g);
+    });
+    snap = build(h, now, riyadhTimeFmt.format(now), false);
+    subs.forEach(fn => fn());
+  }
+
+  step();
+  setInterval(step, TICK_MS); // simulated feed cadence: every 4 s
+
+  function project(hour) {
+    const h = ((hour % 24) + 24) % 24;
+    return build(h, snap.t, hhmm(h) + ':00', true);
+  }
+
+  function meanCurve() {
+    const out = [];
+    for (let i = 0; i <= 48; i++) out.push(SEASONAL + diurnal(i * 0.5) * MEAN_AMP + MEAN_HI);
+    return out;
+  }
+
+  function modelCurve(g, hour, offset) {
+    const out = [];
+    for (let i = 0; i <= 48; i++) {
+      const h = ((hour - 24 + i * 0.5) % 24 + 24) % 24;
+      out.push(modelTemp(g, h) + offset);
+    }
+    return out;
+  }
+
+  // earliest model crossing of `T` in the next 24 h (30-min steps), using
+  // the same model + current drift state as the visible map
+  function nextExtreme(T) {
+    const now = Date.now();
+    const h0 = riyadhHourOf(now);
+    for (let i = 1; i <= 48; i++) {
+      const h = (h0 + i * 0.5) % 24;
+      let hit = null;
+      for (const s of state) {
+        const t = modelTemp(s.g, h) + s.tw;
+        if (t >= T && (!hit || t > hit.temp)) hit = { id: s.g.id, temp: t };
+      }
+      if (hit) return { id: hit.id, temp: hit.temp, at: now + i * 18e5, hour: h };
+    }
+    return null;
+  }
+
+  return {
+    subscribe(cb) { subs.add(cb); return () => subs.delete(cb); },
+    getSnapshot: () => snap,
+    project, meanCurve, modelCurve, nextExtreme,
+    hasData: () => true,
+    status: () => 'sim',
+  };
+}
+
+/* ---------------- Provider 2 · REAL — Open-Meteo --------------------- */
+function createOpenMeteoSource() {
+  /* *** REAL DATA — Open-Meteo (https://open-meteo.com) ***
+   * Free, no API key, CORS-open (works from file:// and any static host).
+   * ONE batched request carries all 20 district coordinates (comma-
+   * separated), returning current conditions plus 72 h of hourly values
+   * (past_days=1 + forecast_days=2) — so the 24-hour scrubber scrubs the
+   * REAL forecast, the panel sparkline shows the real past 24 h, and the
+   * extreme-heat alert scans the real forecast grid.
+   *
+   * Honesty note: these are 2 m AIR temperature / humidity / wind —
+   * not satellite land-surface temperature (LST). The UI labels this.
+   *
+   * Poll cadence 5 min ≈ 300 requests/day (≈ 5,760 location-units),
+   * comfortably inside Open-Meteo's free fair-use limit. */
+  const POLL_MS = 5 * 60 * 1000;
+  const FETCH_TIMEOUT_MS = 12000;
+  const URL = 'https://api.open-meteo.com/v1/forecast'
+    + '?latitude=' + GEO.map(g => g.lat.toFixed(4)).join(',')
+    + '&longitude=' + GEO.map(g => g.lng.toFixed(4)).join(',')
+    + '&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,wind_direction_10m,weather_code'
+    + '&hourly=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,wind_direction_10m,weather_code'
+    + '&wind_speed_unit=kmh&timezone=UTC&past_days=1&forecast_days=2';
+
+  // WMO weather codes → the app's sky vocabulary (icons already cover these)
+  const skyOf = code => (code === 0 ? 'Clear' : code === 45 || code === 48 ? 'Haze' : 'Few clouds');
+  const sevOf = t => (t < 38 ? 'moderate' : t < 43 ? 'high' : 'extreme');
+
+  const subs = new Set();
+  const notify = () => subs.forEach(fn => fn());
+
+  let rows = null;             // hourly series per district, index-aligned with GEO
+  let A0 = 0;                  // absolute UTC hour of hourly index 0
+  let nowAbs = 0, nowHOD = 0;  // current instant (UTC hours) + Riyadh hour-of-day
+  let snap = null;             // current-conditions snapshot (null until first success)
+  let status = 'connecting';   // connecting | ok | stale | error
+  let lastOk = 0;
+  const ROW_BY_ID = {};
+
+  // scrub hour-of-day → absolute UTC hour of its NEXT occurrence
+  // (later today if that clock time is still ahead, otherwise tomorrow)
+  const absOf = h => {
+    const d = (((h - nowHOD) % 24) + 24) % 24;
+    return nowAbs + (h >= 24 && d === 0 ? 24 : d);
+  };
+
+  function ffill(a) { // forward/backward-fill occasional nulls
+    for (let i = 1; i < a.length; i++) if (a[i] == null) a[i] = a[i - 1];
+    for (let i = a.length - 2; i >= 0; i--) if (a[i] == null) a[i] = a[i + 1];
+    return a;
+  }
+
+  function parseLocation(loc) {
+    const H = loc.hourly;
+    const t = H.time.map(s => Date.parse(/Z|[+-]\d{2}:\d{2}$/.test(s) ? s : s + 'Z') / 3.6e6);
+    return {
+      t,
+      temp: ffill(H.temperature_2m.slice()),
+      rh: ffill(H.relative_humidity_2m.slice()),
+      feels: ffill(H.apparent_temperature.slice()),
+      wind: ffill(H.wind_speed_10m.slice()),
+      wdir: H.wind_direction_10m,
+      code: H.weather_code,
+      cur: loc.current || {},
+    };
+  }
+
+  // linear interpolation over the hourly grid, clamped at both ends
+  function sampleAt(row, absH) {
+    const fi = clamp(absH - A0, 0, row.t.length - 1);
+    const i = Math.floor(fi), j = Math.min(i + 1, row.t.length - 1), f = fi - i;
+    const lin = (a, b) => (a == null ? b : b == null ? a : a + (b - a) * f);
+    return {
+      temp: lin(row.temp[i], row.temp[j]),
+      feels: lin(row.feels[i], row.feels[j]),
+      rh: lin(row.rh[i], row.rh[j]),
+      wind: lin(row.wind[i], row.wind[j]),
+      wdir: row.wdir[i], code: row.code[i],
+    };
+  }
+
+  function districtRow(g, row, absH) {
+    const s = sampleAt(row, absH);
+    return {
+      id: g.id, temp: s.temp, feels: s.feels, rh: Math.round(clamp(s.rh, 0, 100)),
+      wind: Math.round(clamp(s.wind, 0, 250)), windDir: compassOf(s.wdir == null ? 0 : s.wdir),
+      sky: skyOf(s.code), sev: sevOf(s.temp),
+      trend: sampleAt(row, absH + 0.5).temp - sampleAt(row, absH - 0.5).temp,
+    };
+  }
+
+  function assemble(districts, hour, scrubbed) {
+    const byId = {}; districts.forEach(d => byId[d.id] = d);
+    return {
+      t: Date.now(), hour, districts, byId, scrubbed, source: 'live',
+      stale: status === 'stale',
+      updated: riyadhTimeFmt.format(lastOk || Date.now()).slice(0, 5),
+      mean: districts.reduce((a, d) => a + d.temp, 0) / districts.length,
+      peak: districts.reduce((a, d) => d.temp > a.temp ? d : a, districts[0]),
+    };
+  }
+
+  function buildLiveSnapshot() {
+    const now = Date.now();
+    nowAbs = now / 3.6e6;
+    nowHOD = riyadhHourOf(now);
+    const districts = GEO.map((g, i) => {
+      const C = rows[i].cur, s = sampleAt(rows[i], nowAbs);
+      const temp = C.temperature_2m == null ? s.temp : C.temperature_2m;
+      return {
+        id: g.id, temp,
+        feels: C.apparent_temperature == null ? temp : C.apparent_temperature,
+        rh: Math.round(clamp(C.relative_humidity_2m == null ? s.rh : C.relative_humidity_2m, 0, 100)),
+        wind: Math.round(clamp(C.wind_speed_10m == null ? s.wind : C.wind_speed_10m, 0, 250)),
+        windDir: compassOf(C.wind_direction_10m == null ? (s.wdir || 0) : C.wind_direction_10m),
+        sky: skyOf(C.weather_code), sev: sevOf(temp),
+        trend: sampleAt(rows[i], nowAbs + 0.5).temp - sampleAt(rows[i], nowAbs - 0.5).temp,
+      };
+    });
+    snap = assemble(districts, nowHOD, false);
+  }
+
+  // 24h scrub: real hourly forecast, linearly interpolated to 5-min positions
+  function project(hour) {
+    const h = ((hour % 24) + 24) % 24;
+    const absH = absOf(h);
+    return assemble(GEO.map((g, i) => districtRow(g, rows[i], absH)), h, true);
+  }
+
+  function meanCurve() {
+    const out = [];
+    for (let i = 0; i <= 48; i++) {
+      const absH = absOf(i * 0.5);
+      let sum = 0;
+      for (let k = 0; k < rows.length; k++) sum += sampleAt(rows[k], absH).temp;
+      out.push(sum / rows.length);
+    }
+    return out;
+  }
+
+  // real 24 h window ending at `hour` (past day for the live view,
+  // forecast when scrubbed) — same shape as the simulated modelCurve
+  function modelCurve(g, hour, _offset) {
+    const row = ROW_BY_ID[g.id];
+    if (!row) return [];
+    const end = absOf(hour);
+    const out = [];
+    for (let i = 0; i <= 48; i++) out.push(sampleAt(row, end - 24 + i * 0.5).temp);
+    return out;
+  }
+
+  // EXTREME-HEAT EARLY WARNING: earliest hourly grid point in the next 24 h
+  // where any district is forecast ≥ T; reports the hottest district then.
+  // Grid-based on purpose — the time and value are real forecast readings.
+  function nextExtreme(T) {
+    if (!rows) return null;
+    const cur = Date.now() / 3.6e6;
+    const start = Math.max(0, Math.ceil(cur - A0));
+    const end = Math.min(rows[0].t.length - 1, Math.ceil(cur + 24 - A0));
+    for (let j = start; j <= end; j++) {
+      let hit = null;
+      for (let k = 0; k < rows.length; k++) {
+        const t = rows[k].temp[j];
+        if (t != null && t >= T && (!hit || t > hit.temp)) hit = { id: GEO[k].id, temp: t, at: rows[k].t[j] * 3.6e6 };
+      }
+      if (hit) return { id: hit.id, temp: hit.temp, at: hit.at, hour: riyadhHourOf(new Date(hit.at)) };
+    }
+    return null;
+  }
+
+  let inFlight = false;
+  async function poll() {
+    if (inFlight) return;
+    inFlight = true;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(URL, { signal: ctl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length < GEO.length || data[0].error) {
+        throw new Error('unexpected payload');
+      }
+      rows = data.slice(0, GEO.length).map(parseLocation);
+      GEO.forEach((g, i) => { ROW_BY_ID[g.id] = rows[i]; });
+      A0 = rows[0].t[0];
+      lastOk = Date.now();
+      status = 'ok';
+      buildLiveSnapshot();
+    } catch (e) {
+      // keep the last good snapshot, flag it as stalled; if we never had
+      // one the controller keeps the simulated feed on screen
+      status = snap ? 'stale' : 'error';
+      console.warn('[haara] open-meteo feed unavailable —', e && e.message);
+      if (snap) snap = { ...snap, stale: true };
+    } finally {
+      clearTimeout(timer);
+      inFlight = false;
+      notify();
+    }
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+  // refresh promptly when returning to the tab if the feed has gone stale
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - lastOk > POLL_MS) poll();
+  });
+
+  return {
+    subscribe(cb) { subs.add(cb); return () => subs.delete(cb); },
+    getSnapshot: () => snap,
+    project, meanCurve, modelCurve, nextExtreme,
+    hasData: () => !!snap,
+    status: () => status,
+  };
+}
+
+/* ---------------- Controller — live/sim switchboard ------------------ */
+function createFeedController(sim, live) {
+  /* The app talks only to this. It forwards the active provider's
+   * snapshot and attaches a `feed` block (desired / effective source,
+   * live status) so every status label in the UI tells the truth.
+   * LIVE is the default; the simulated feed stands in whenever live
+   * data hasn't loaded or has never succeeded, and is always one
+   * toggle away for side-by-side comparison. */
+  let desired = 'live';
+  const subs = new Set();
+  const notify = () => subs.forEach(fn => fn());
+
+  sim.subscribe(() => notify());
+  live.subscribe(() => notify());
+
+  const active = () => (desired === 'live' && live.hasData() ? live : sim);
+
+  let cached = null, cachedKey = '';
+  function getSnapshot() {
+    const s = active().getSnapshot();
+    const key = desired + '|' + live.status() + '|' + s.source + (s.stale ? '|s' : '') + '|' + s.t;
+    if (key !== cachedKey) {
+      cachedKey = key;
+      cached = { ...s, feed: {
+        desired,
+        effective: s.source,
+        liveStatus: live.status(),
+      }};
+    }
+    return cached;
+  }
+
+  return {
+    subscribe(cb) { subs.add(cb); return () => subs.delete(cb); },
+    getSnapshot,
+    project: h => active().project(h),
+    meanCurve: () => active().meanCurve(),
+    modelCurve: (g, h, o) => active().modelCurve(g, h, o),
+    nextExtreme: T => active().nextExtreme(T),
+    setMode(m) { if (desired !== m) { desired = m; notify(); } },
+  };
+}
+
+const SIMULATED = createSimulatedSource();
+const OPEN_METEO = createOpenMeteoSource();
+const SOURCE = createFeedController(SIMULATED, OPEN_METEO);
+window.__HAARA_SOURCE = SOURCE;                          // debug: the switchboard
+window.__HAARA_FEEDS = { simulated: SIMULATED, openMeteo: OPEN_METEO }; // debug: raw providers
+
+/* =====================================================================
+ * HOOKS
+ * ===================================================================== */
+function useRiyadhClock() {
+  const [t, setT] = useState(() => ({ hms: riyadhTimeFmt.format(new Date()), date: riyadhDateFmt.format(new Date()) }));
+  useEffect(() => {
+    const i = setInterval(() => setT({ hms: riyadhTimeFmt.format(new Date()), date: riyadhDateFmt.format(new Date()) }), 1000);
+    return () => clearInterval(i);
+  }, []);
+  return t;
+}
+
+function useReducedMotion() {
+  const [r, setR] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    const m = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const f = e => setR(e.matches);
+    m.addEventListener('change', f);
+    return () => m.removeEventListener('change', f);
+  }, []);
+  return r;
+}
+
+function labelPos(g) {
+  const s = g.lp || 'b', dx = g.ldx || 0, dy = g.ldy || 0;
+  if (s === 'a') return { x: g.x + dx, y: g.y - g.r * 0.78 - 7 + dy, a: 'middle' };
+  if (s === 'l') return { x: g.x - g.r * 0.78 - 7 + dx, y: g.y + 3 + dy, a: 'end' };
+  if (s === 'r') return { x: g.x + g.r * 0.78 + 7 + dx, y: g.y + 3 + dy, a: 'start' };
+  return { x: g.x + dx, y: g.y + g.r * 0.78 + 9 + dy, a: 'middle' };
+}
+
+/* Small hand-drawn stroke icon set (no icon font needed) */
+const ICONS = {
+  search:  (<g><circle cx="11" cy="11" r="7"/><path d="M16.2 16.2 21 21"/></g>),
+  close:   (<g><path d="M6 6l12 12M18 6 6 18"/></g>),
+  thermo:  (<g><path d="M10 13.7V5a2 2 0 0 1 4 0v8.7a4.3 4.3 0 1 1-4 0Z"/><path d="M12 9.5V15"/></g>),
+  droplet: (<g><path d="M12 3.4c2.8 3.2 5.6 6.4 5.6 9.5a5.6 5.6 0 1 1-11.2 0c0-3.1 2.8-6.3 5.6-9.5Z"/></g>),
+  wind:    (<g><path d="M4 8.4h8.7a2.5 2.5 0 1 0-2.4-3.2"/><path d="M3 12.4h13.5a2.8 2.8 0 1 1-2.7 3.5"/><path d="M5 16.4h5.6"/></g>),
+  sun:     (<g><circle cx="12" cy="12" r="4"/><path d="M12 3v2.3M12 18.7V21M3 12h2.3M18.7 12H21M5.7 5.7l1.6 1.6M16.7 16.7l1.6 1.6M18.3 5.7l-1.6 1.6M7.3 16.7l-1.6 1.6"/></g>),
+  cloud:   (<g><path d="M7.2 18.3h9.3a3.8 3.8 0 0 0 .7-7.5A5.5 5.5 0 0 0 6.3 11.7a3.6 3.6 0 0 0 .9 6.6Z"/></g>),
+  haze:    (<g><circle cx="12" cy="7.6" r="3.1"/><path d="M4.6 14.8h14.8M6.8 18.3h10.4"/></g>),
+  dust:    (<g><path d="M4 13.4h9.7a2.3 2.3 0 1 1-2.2 2.9"/><path d="M6.5 8.6h12.8"/><path d="M9.5 4.8h6.3"/></g>),
+  chevup:  (<g><path d="M6.5 14.5 12 9l5.5 5.5"/></g>),
+  chevdown:(<g><path d="M6.5 9.5 12 15l5.5-5.5"/></g>),
+  steady:  (<g><path d="M6.5 12h11"/></g>),
+  play:    (<g><path d="M8 5.6v12.8L19 12Z"/></g>),
+  pause:   (<g><path d="M9 6v12M15.6 6v12"/></g>),
+  live:    (<g><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><path d="M12 2.6v2.6M12 18.8v2.6M2.6 12h2.6M18.8 12h2.6"/></g>),
+  alert:   (<g><path d="M12 4.3 20.6 19.4H3.4Z"/><path d="M12 10.2v3.7"/><path d="M12 16.8v.2"/></g>),
+};
+const SKY_ICON = { 'Clear': 'sun', 'Haze': 'haze', 'Dust haze': 'dust', 'Blowing dust': 'dust', 'Few clouds': 'cloud' };
+
+function I({ n, className = '', size = 14 }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+      strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      {ICONS[n]}
+    </svg>
+  );
+}
+
+/* =====================================================================
+ * EXTREME-HEAT ALERTS — evaluation hook + toast.
+ *
+ * Three alert kinds, in priority order:
+ *   now   — a district is ≥ ALERT_T in the current live view
+ *   ahead — the active provider's forecast crosses ALERT_T within 24 h
+ *           (real Open-Meteo hourly grid in live mode, model in sim mode)
+ *   scrub — the hour being inspected on the 24 h timeline is ≥ ALERT_T
+ *
+ * Deduplication is event-based: each alert has an identity key (source,
+ * district, and a time bucket for timed alerts). Dismissed keys never
+ * re-fire — except live "now" alerts, which re-arm after 20 min as a
+ * "still extreme" reminder, and forecast alerts, which re-notify once
+ * when the event is imminent (< 1 h away). Playback mutes new toasts
+ * (the map itself is the readout while sweeping); manual scrub keeps
+ * firing, mirroring whatever hour is under the probe.
+ * ===================================================================== */
+const NOW_REARM_MS = 20 * 60 * 1000;
+
+function alertKeyOf(a) {
+  if (a.kind === 'now') return `now:${a.source}:${a.districtId}`;
+  if (a.kind === 'scrub') return `scrub:${a.source}:${a.districtId}:${Math.floor(a.hour / 0.5)}`;
+  const imm = a.at - Date.now() < 36e5 ? ':imm' : ''; // imminent re-notification
+  return `ahead:${a.source}:${a.districtId}:${Math.floor(a.at / 18e5)}${imm}`;
+}
+
+function useExtremeAlert(view, ahead, muted) {
+  const [toast, setToast] = useState(null);
+  const toastRef = useRef(null); toastRef.current = toast;
+  const dismissed = useRef(new Map());
+
+  useEffect(() => {
+    const cur = toastRef.current;
+    if (muted) { if (cur) setToast(null); return; } // playback: the map is the readout
+    // scrub alerts are ephemeral — they describe the hour being inspected,
+    // so they retire when that hour (or scrub mode itself) is left
+    if (cur && cur.kind === 'scrub' && (!view.scrubbed || Math.floor(view.hour / 0.5) !== Math.floor(cur.hour / 0.5))) {
+      setToast(null);
+    }
+
+    let cand = null;
+    if (view.peak && view.peak.temp >= ALERT_T) {
+      cand = view.scrubbed
+        ? { kind: 'scrub', districtId: view.peak.id, temp: view.peak.temp, hour: view.hour, source: view.source }
+        : { kind: 'now', districtId: view.peak.id, temp: view.peak.temp, source: view.source };
+    } else if (ahead && !view.stale) {
+      cand = { kind: 'ahead', districtId: ahead.id, temp: ahead.temp, hour: ahead.hour, at: ahead.at, source: view.source };
+    }
+    if (!cand) return;
+
+    const key = alertKeyOf(cand);
+    const t0 = dismissed.current.get(key);
+    if (t0 != null) {
+      if (!(cand.kind === 'now' && Date.now() - t0 > NOW_REARM_MS)) return;
+      dismissed.current.delete(key); // re-armed: "still extreme" reminder
+    }
+    if (!toastRef.current || toastRef.current.key !== key) setToast({ key, ...cand });
+  }, [view, ahead, muted]);
+
+  const dismiss = useCallback((key) => {
+    if (dismissed.current.size > 300) dismissed.current.clear();
+    dismissed.current.set(key, Date.now());
+    setToast(t => (t && t.key === key ? null : t));
+  }, []);
+
+  return [toast, dismiss];
+}
+
+function ExtremeToast({ alert, onDismiss, onView }) {
+  const HOLD_MS = 10000;
+  const [left, setLeft] = useState(HOLD_MS);
+  const paused = useRef(false);
+  const g = GEO_BY_ID[alert.districtId];
+
+  // countdown (pauses on hover / keyboard focus so it can be read at leisure)
+  useEffect(() => {
+    let remaining = HOLD_MS;
+    setLeft(HOLD_MS);
+    const iv = setInterval(() => {
+      if (paused.current) return;
+      remaining -= 100;
+      setLeft(Math.max(0, remaining));
+      if (remaining <= 0) { clearInterval(iv); onDismiss(alert.key); }
+    }, 100);
+    return () => clearInterval(iv);
+  }, [alert.key, onDismiss]);
+
+  const chip = alert.kind === 'now' ? 'NOW'
+    : `${alert.source === 'live' ? 'FCST' : 'MODEL'} ${hhmm(alert.hour)}`;
+  let rel = null;
+  if (alert.kind === 'ahead' && alert.at) {
+    const d = alert.at - Date.now();
+    rel = d <= 0 ? null
+      : d < 36e5 ? `IN ${Math.max(1, Math.round(d / 6e4))}M`
+      : `IN ${Math.floor(d / 36e5)}H ${String(Math.round((d % 36e5) / 6e4)).padStart(2, '0')}M`;
+  }
+
+  return (
+    <div role="alert"
+      className="toast-in glass rounded-lg relative overflow-hidden pointer-events-auto w-[min(92vw,380px)] max-w-full"
+      style={{ borderColor: 'rgba(224,82,46,0.38)' }}
+      onPointerEnter={() => { paused.current = true; }}
+      onPointerLeave={() => { paused.current = false; }}
+      onFocus={() => { paused.current = true; }}
+      onBlur={() => { paused.current = false; }}
+      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); onDismiss(alert.key); } }}>
+      <div className="flex items-stretch">
+        <button type="button" onClick={() => onView(alert)}
+          className="flex items-center gap-3 pl-3.5 pr-3 py-2.5 flex-1 min-w-0 text-left">
+          <span className="shrink-0 text-[#E0522E]"><I n="alert" size={17}/></span>
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 font-mono text-[9px] tracking-[0.2em] text-[#E0522E] min-w-0">
+              <span className="shrink-0">EXTREME HEAT</span>
+              <span className="shrink-0 border border-[#E0522E]/40 rounded px-1.5 py-[1px] text-[8px] tracking-[0.14em]">{chip}</span>
+              {rel && <span className="truncate text-slate-500 tracking-[0.12em]">{rel}</span>}
+            </p>
+            <p className="mt-[5px] flex items-baseline gap-1.5 min-w-0">
+              <span className="text-[13px] text-slate-100 truncate">{g.name}</span>
+              <span className="font-mono text-[13px] tabular-nums shrink-0" style={{ color: rampColor(alert.temp) }}>{alert.temp.toFixed(1)}°C</span>
+              <span className="font-mono text-[8px] tracking-[0.16em] text-slate-500 shrink-0">CLICK TO VIEW</span>
+            </p>
+          </div>
+        </button>
+        <button type="button" onClick={() => onDismiss(alert.key)} aria-label="Dismiss extreme heat alert"
+          className="shrink-0 px-2.5 text-slate-500 hover:text-slate-200 hover:bg-white/[0.06] transition-colors">
+          <I n="close" size={13}/>
+        </button>
+      </div>
+      <span aria-hidden="true" className="absolute bottom-0 left-0 h-[2px] bg-[#E0522E]/80"
+        style={{ width: `${(left / HOLD_MS * 100).toFixed(1)}%`, transition: 'width .1s linear' }}/>
+    </div>
+  );
+}
+
+/* =====================================================================
+ * THE MAP — plain SVG: night texture, screen-blended thermal blobs,
+ * labels, hit targets, focus/selection rings, scale bar & north mark.
+ * ===================================================================== */
+const ARROWS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+
+function MapSvg({ snap, selectedId, ping, onSelect }) {
+  const [hoverId, setHoverId] = useState(null);
+  const [focusId, setFocusId] = useState(null);
+  const [tip, setTip] = useState(null);
+
+  const handleHitKey = (e, id) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(id); return; }
+    if (e.key === 'Escape') { onSelect(null); return; }
+    const v = ARROWS[e.key];
+    if (!v) return;
+    e.preventDefault();
+    // spatial arrow-key navigation: pick the best-aligned district in that direction
+    const cur = GEO_BY_ID[id];
+    let best = null, bs = -Infinity;
+    GEO.forEach(g => {
+      if (g.id === id) return;
+      const dx = g.x - cur.x, dy = g.y - cur.y, dist = Math.hypot(dx, dy);
+      if (dist < 20) return;
+      const dir = (dx * v[0] + dy * v[1]) / dist;
+      if (dir < 0.35) return;
+      const score = dir * 100 - dist * 0.32;
+      if (score > bs) { bs = score; best = g.id; }
+    });
+    if (best && HIT_EL[best]) HIT_EL[best].focus();
+  };
+
+  // Everything that never changes: graticule, roads, wadi, city lights, scale bar
+  const base = useMemo(() => (
+    <g>
+      <g stroke="#8FA2B8" strokeWidth="0.7" opacity="0.055" strokeDasharray="1.5 5" pointerEvents="none">
+        <line x1="134.7" y1="10" x2="134.7" y2="990"/>
+        <line x1="379.6" y1="10" x2="379.6" y2="990"/>
+        <line x1="10" y1="253.3" x2="590" y2="253.3"/>
+        <line x1="10" y1="520" x2="590" y2="520"/>
+        <line x1="10" y1="786.7" x2="590" y2="786.7"/>
+      </g>
+      <g className="svg-mono" fontSize="7" fill="#7C8A9C" opacity="0.45" pointerEvents="none">
+        <text x="14" y="256">24.8°N</text>
+        <text x="14" y="523">24.7°N</text>
+        <text x="14" y="790">24.6°N</text>
+        <text x="131" y="991">46.6°E</text>
+        <text x="376" y="991">46.7°E</text>
+      </g>
+      {ROADS.map((rd, i) => (
+        <g key={'rd' + i} pointerEvents="none">
+          <path d={smoothPath(rd.pts)} fill="none" stroke="#D9C7A0" strokeWidth={rd.w * 4.5} opacity={rd.o * 0.3} filter="url(#soft2)"/>
+          <path d={smoothPath(rd.pts)} fill="none" stroke="#E6D6B0" strokeWidth={rd.w} opacity={rd.o} strokeLinecap="round"/>
+        </g>
+      ))}
+      {RING_PATHS.map((d, i) => (
+        <g key={'ring' + i} pointerEvents="none">
+          <path d={d} fill="none" stroke="#D9C7A0" strokeWidth="4.5" opacity="0.04" filter="url(#soft2)"/>
+          <path d={d} fill="none" stroke="#E6D6B0" strokeWidth="0.9" opacity="0.1"/>
+        </g>
+      ))}
+      <g pointerEvents="none">
+        <path d={WADI} fill="none" stroke="#33566B" strokeWidth="4" opacity="0.32" filter="url(#soft2)"/>
+        <text x="26" y="600" transform="rotate(-86 26 600)" fontSize="6.5" letterSpacing="2.4" fill="#54707F" opacity="0.85" className="svg-mono">WADI HANIFAH</text>
+      </g>
+      <g pointerEvents="none">
+        {LIGHTS.map((p, i) => (
+          <circle key={i} cx={p.x.toFixed(1)} cy={p.y.toFixed(1)} r={p.r.toFixed(2)} fill={p.c} opacity={p.o.toFixed(3)}/>
+        ))}
+      </g>
+      <g pointerEvents="none" transform="translate(452,958)">
+        <line x1="0" y1="0" x2="120" y2="0" stroke="#8FA2B8" strokeWidth="1" opacity="0.55"/>
+        <line x1="0" y1="-3.5" x2="0" y2="3.5" stroke="#8FA2B8" strokeWidth="1" opacity="0.55"/>
+        <line x1="60" y1="-2.5" x2="60" y2="2.5" stroke="#8FA2B8" strokeWidth="1" opacity="0.4"/>
+        <line x1="120" y1="-3.5" x2="120" y2="3.5" stroke="#8FA2B8" strokeWidth="1" opacity="0.55"/>
+        <text x="60" y="-8" textAnchor="middle" fontSize="8" fill="#8FA2B8" opacity="0.75" className="svg-mono">5 KM</text>
+      </g>
+      <g pointerEvents="none" transform="translate(581,964)">
+        <path d="M0 9V-4M-4 1L0-6L4 1" fill="none" stroke="#8FA2B8" strokeWidth="1" opacity="0.6"/>
+        <text x="0" y="-12" textAnchor="middle" fontSize="7.5" fill="#8FA2B8" opacity="0.75" className="svg-mono">N</text>
+      </g>
+    </g>
+  ), []);
+
+  const selG = selectedId ? GEO_BY_ID[selectedId] : null;
+  const focG = focusId && focusId !== selectedId ? GEO_BY_ID[focusId] : null;
+  const pingG = ping ? GEO_BY_ID[ping.id] : null;
+
+  let tipEl = null;
+  if (tip) {
+    const g = GEO_BY_ID[tip.id], rec = snap.byId[tip.id];
+    const left = Math.min(tip.x + 16, (window.innerWidth || 0) - 210);
+    const top = Math.min(tip.y + 14, (window.innerHeight || 0) - 70);
+    tipEl = (
+      <div className="fixed z-[70] pointer-events-none glass rounded-md px-3 py-2" style={{ left, top }}>
+        <p className="font-mono text-[9.5px] tracking-[0.2em] text-slate-300">{g.name.toUpperCase()}</p>
+        <p className="mt-1 font-mono text-[11px] leading-none">
+          <span style={{ color: rampColor(rec.temp) }}>{rec.temp.toFixed(1)}°C</span>
+          <span className="text-slate-500"> · {SEV[rec.sev].label}</span>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <svg viewBox="0 0 600 1000" preserveAspectRatio="xMidYMid meet" role="group"
+        aria-label={`${snap.source === 'live' ? 'Live' : 'Simulated'} satellite-style heat map of Riyadh districts`}
+        className="h-full w-full select-none" style={{ overflow: 'visible' }}
+        onClick={() => onSelect(null)}>
+
+        <defs>
+          <filter id="heatBlur" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="6.5"/></filter>
+          <filter id="soft2" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.6"/></filter>
+          <radialGradient id="vig" cx="50%" cy="46%" r="78%">
+            <stop offset="50%" stopColor="#04070C" stopOpacity="0"/>
+            <stop offset="100%" stopColor="#02050A" stopOpacity="0.72"/>
+          </radialGradient>
+          {/* city-wide heat dome, tinted by the current city mean */}
+          <radialGradient id="ambG">
+            <stop offset="0%" stopColor={rampColor(snap.mean)} stopOpacity="0.1"/>
+            <stop offset="55%" stopColor={rampColor(snap.mean - 2.5)} stopOpacity="0.05"/>
+            <stop offset="100%" stopColor={rampColor(snap.mean - 5)} stopOpacity="0"/>
+          </radialGradient>
+          {/* per-district thermal gradient — hotter hue at the core, cooler at the rim */}
+          {GEO.map(g => {
+            const rec = snap.byId[g.id];
+            return (
+              <radialGradient key={g.id} id={`hg-${g.id}`}>
+                <stop offset="0%" stopColor={rampColor(rec.temp + 1.2)} stopOpacity="0.92"/>
+                <stop offset="36%" stopColor={rampColor(rec.temp)} stopOpacity="0.5"/>
+                <stop offset="68%" stopColor={rampColor(rec.temp - 1.8)} stopOpacity="0.17"/>
+                <stop offset="100%" stopColor={rampColor(rec.temp - 2.6)} stopOpacity="0"/>
+              </radialGradient>
+            );
+          })}
+        </defs>
+
+        <rect x="0" y="0" width="600" height="1000" fill="#060A11"/>
+        {base}
+
+        {/* urban heat dome */}
+        <ellipse cx="300" cy="570" rx="255" ry="335" fill="url(#ambG)" style={{ mixBlendMode: 'screen' }} pointerEvents="none"/>
+
+        {/* thermal layer — screen-blended so overlapping heat blooms hotter, like real thermal imaging */}
+        <g style={{ mixBlendMode: 'screen' }} pointerEvents="none">
+          {GEO.map((g, i) => {
+            const emph = hoverId === g.id || selectedId === g.id;
+            const dim = selectedId && selectedId !== g.id;
+            return (
+              <circle key={g.id} cx={g.x} cy={g.y} r={g.r} fill={`url(#hg-${g.id})`} filter="url(#heatBlur)"
+                className="blob" style={{
+                  opacity: emph ? 1 : (dim ? 0.5 : 0.82),
+                  animationDuration: `${(7 + (i % 5) * 1.3).toFixed(1)}s`,
+                  animationDelay: `${(-(i * 1.17)).toFixed(1)}s`,
+                }}/>
+            );
+          })}
+        </g>
+
+        <rect x="0" y="0" width="600" height="1000" fill="url(#vig)" pointerEvents="none"/>
+
+        {/* timestamp burn-in while scrubbing (satellite-frame style) */}
+        {snap.scrubbed && (
+          <text x="300" y="26" textAnchor="middle" fontSize="8" letterSpacing="3" fill="#8FA2B8" opacity="0.5"
+            className="svg-mono" pointerEvents="none">{`${snap.source === 'live' ? 'FORECAST' : 'MODEL'} ${hhmm(snap.hour)} AST`}</text>
+        )}
+
+        {/* labels + center crosshair marks */}
+        <g className="svg-mono" pointerEvents="none">
+          {GEO.map(g => {
+            const emph = hoverId === g.id || selectedId === g.id;
+            const dim = selectedId && selectedId !== g.id;
+            const p = labelPos(g);
+            return (
+              <g key={g.id}>
+                <text x={p.x} y={p.y} textAnchor={p.a} fontSize="9.5" letterSpacing="1.5"
+                  fill={emph ? '#F2F6FA' : '#93A1B2'} opacity={emph ? 1 : (dim ? 0.32 : 0.62)}
+                  stroke="#060A11" strokeWidth="2.2" paintOrder="stroke" strokeLinejoin="round">
+                  {g.name.toUpperCase()}
+                </text>
+                <path d={`M${(g.x - 3.2).toFixed(1)} ${g.y.toFixed(1)}h6.4M${g.x.toFixed(1)} ${(g.y - 3.2).toFixed(1)}v6.4`}
+                  stroke="#E9EEF4" strokeWidth="0.9" opacity={emph ? 0.95 : 0.38} fill="none"/>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* hit targets (keyboard-focusable, drawn above everything visual) */}
+        <g>
+          {GEO.map(g => {
+            const rec = snap.byId[g.id];
+            return (
+              <circle key={g.id} ref={el => { HIT_EL[g.id] = el; }}
+                cx={g.x} cy={g.y} r={g.r * 0.85} fill="transparent"
+                className="hitcircle" tabIndex={0} role="button"
+                aria-label={`${g.name}: ${rec.temp.toFixed(1)} degrees Celsius, ${SEV[rec.sev].label.toLowerCase()}`}
+                onClick={e => { e.stopPropagation(); onSelect(g.id); }}
+                onKeyDown={e => handleHitKey(e, g.id)}
+                onFocus={() => setFocusId(g.id)}
+                onBlur={() => setFocusId(f => (f === g.id ? null : f))}
+                onPointerEnter={e => { if (e.pointerType !== 'touch') setHoverId(g.id); }}
+                onPointerLeave={() => { setHoverId(h => (h === g.id ? null : h)); setTip(null); }}
+                onPointerMove={e => { if (e.pointerType === 'mouse') setTip({ x: e.clientX, y: e.clientY, id: g.id }); }}
+              />
+            );
+          })}
+        </g>
+
+        {/* keyboard focus ring, selection ring, locating ping */}
+        <g pointerEvents="none">
+          {focG && <circle cx={focG.x} cy={focG.y} r={focG.r * 1.08} fill="none" stroke="rgba(216,162,75,0.85)" strokeWidth="1" strokeDasharray="5 7"/>}
+          {selG && <circle className="sel-ring" cx={selG.x} cy={selG.y} r={selG.r * 1.18} fill="none" stroke="rgba(238,243,248,0.7)" strokeWidth="1" strokeDasharray="4 7"/>}
+          {pingG && <circle key={ping.at} className="ping-ring" cx={pingG.x} cy={pingG.y} r={pingG.r * 1.28} fill="none" stroke="#EEF3F8" strokeWidth="1.3"/>}
+        </g>
+      </svg>
+      {tipEl}
+    </>
+  );
+}
+
+/* =====================================================================
+ * TOP BAR — wordmark, live dot, Riyadh clock, search
+ * ===================================================================== */
+function SearchBar({ snap, onSelect }) {
+  const [q, setQ] = useState('');
+  const [idx, setIdx] = useState(0);
+  const [listOpen, setListOpen] = useState(false);
+  const inputRef = useRef(null);
+  const optRef = useRef(null);
+  const lq = q.trim().toLowerCase();
+  const results = lq
+    ? GEO.filter(g => g.name.toLowerCase().includes(lq)
+        || (g.alt || []).some(a => a.includes(lq))
+        || g.ar.includes(q.trim()))
+    : [];
+
+  useEffect(() => { setIdx(0); }, [lq]);
+  useEffect(() => { if (optRef.current) optRef.current.scrollIntoView({ block: 'nearest' }); }, [idx]);
+
+  const pick = id => { onSelect(id); setQ(''); setListOpen(false); if (inputRef.current) inputRef.current.blur(); };
+  const onKey = e => {
+    if (e.key === 'ArrowDown' && results.length) { e.preventDefault(); setIdx(i => Math.min(i + 1, results.length - 1)); }
+    else if (e.key === 'ArrowUp' && results.length) { e.preventDefault(); setIdx(i => Math.max(0, i - 1)); }
+    else if (e.key === 'Enter' && results[idx]) { e.preventDefault(); pick(results[idx].id); }
+    else if (e.key === 'Escape') { setQ(''); setListOpen(false); }
+  };
+
+  return (
+    <div className="relative"
+      onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setListOpen(false); }}
+      onFocus={() => setListOpen(true)}>
+      <div className="glass rounded-lg flex items-center focus-within:border-[rgba(216,162,75,0.4)] transition-colors">
+        <span className="pl-3 text-slate-600 pointer-events-none"><I n="search" size={14}/></span>
+        <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={onKey}
+          type="text" role="combobox" aria-expanded={listOpen && results.length > 0} aria-label="Search districts"
+          placeholder="Search districts · بالعربية"
+          className="w-full bg-transparent px-3 py-2.5 text-[12.5px] text-slate-200 placeholder:text-slate-600 focus:outline-none"/>
+      </div>
+      {listOpen && lq && (
+        <div className="absolute z-10 mt-2 w-full glass rounded-lg max-h-[248px] overflow-y-auto scroll-thin" role="listbox">
+          {results.length === 0 && <p className="px-4 py-3 font-mono text-[10px] tracking-[0.14em] text-slate-500">NO DISTRICT FOUND</p>}
+          {results.map((g, i) => {
+            const rec = snap.byId[g.id];
+            return (
+              <button key={g.id} type="button" role="option" aria-selected={i === idx}
+                ref={i === idx ? optRef : null}
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => pick(g.id)}
+                className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-left ${i === idx ? 'bg-white/[0.07]' : 'hover:bg-white/[0.05]'} transition-colors`}>
+                <span className="flex-1 truncate text-[12.5px] text-slate-200">{g.name}</span>
+                <span className="font-ar text-[12px] text-slate-500" dir="rtl">{g.ar}</span>
+                <span className="font-mono text-[11px]" style={{ color: rampColor(rec.temp) }}>{rec.temp.toFixed(1)}°</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopBar({ clock, snap, onSelect, feed, model }) {
+  const liveOn = snap.source === 'live';
+  const subtitle = model != null
+    ? `RIYADH HEAT MAP · ${liveOn ? '24H FORECAST' : '24H MODEL'} ${model}`
+    : liveOn
+      ? (snap.stale ? 'LIVE · OPEN-METEO · FEED STALLED' : 'LIVE · OPEN-METEO')
+      : feed.desired === 'live'
+        ? (feed.liveStatus === 'connecting' ? 'SIMULATED · CONNECTING TO LIVE' : 'SIMULATED · LIVE UNAVAILABLE')
+        : 'SIMULATED FEED';
+  return (
+    <header className="fixed top-0 inset-x-0 z-[60] pointer-events-none">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 px-4 sm:px-7 pt-4">
+        <div className="pointer-events-auto">
+          <div className="flex items-center gap-2.5">
+            <span className={`live-dot w-[7px] h-[7px] rounded-full shrink-0 ${liveOn ? 'bg-[#D8A24B]' : 'bg-[#6FA7BE]'}`}
+              title={liveOn ? 'Open-Meteo live feed — active' : 'Simulated feed — active'} aria-hidden="true"></span>
+            <h1 className="text-[21px] font-semibold tracking-tight text-slate-100 leading-none">Haara</h1>
+            <span className="font-ar text-[16px] text-slate-400 leading-none" dir="rtl" lang="ar">حارة</span>
+          </div>
+          <p className="mt-[9px] font-mono text-[9px] tracking-[0.26em] text-slate-500">{subtitle}</p>
+          <p className="mt-[5px] font-mono text-[9px] tracking-[0.14em] text-slate-500 tabular-nums">{clock.date} · {clock.hms} AST</p>
+        </div>
+        <div className="pointer-events-auto w-full sm:w-[264px]">
+          <SearchBar snap={snap} onSelect={onSelect}/>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* =====================================================================
+ * SOURCE TOGGLE — LIVE (Open-Meteo) vs SIM (model), plus live status.
+ * Sits at the top of the left instrument column.
+ * ===================================================================== */
+function SourceToggle({ feed, updated, onMode }) {
+  const liveSel = feed.desired === 'live';
+  const st = feed.liveStatus;
+  const note = !liveSel ? 'SIMULATED MODEL'
+    : st === 'ok' ? `OPEN-METEO · ${updated}`
+    : st === 'stale' ? `STALLED · LAST ${updated}`
+    : st === 'connecting' ? 'CONNECTING…'
+    : 'UNAVAILABLE · SHOWING SIM';
+  const noteAmber = liveSel && (st === 'connecting' || st === 'error');
+  return (
+    <div className="scrubber-bar glass rounded-full h-[42px] flex items-center gap-2 sm:gap-3 pl-4 pr-3.5 select-none pointer-events-auto">
+      <span className="font-mono text-[8.5px] tracking-[0.24em] text-slate-500 shrink-0">SOURCE</span>
+      <div className="flex rounded-full border border-white/[0.08] p-[3px] shrink-0" role="group" aria-label="Data source">
+        <button type="button" aria-pressed={liveSel} onClick={() => onMode('live')}
+          title="Open-Meteo live observations and hourly forecast"
+          className={`px-3 py-[5px] rounded-full font-mono text-[9px] tracking-[0.2em] transition-colors ${
+            liveSel ? 'bg-[#D8A24B]/15 text-[#E8B367]' : 'text-slate-500 hover:text-slate-300'}`}>
+          LIVE
+        </button>
+        <button type="button" aria-pressed={!liveSel} onClick={() => onMode('sim')}
+          title="Simulated thermal model"
+          className={`px-3 py-[5px] rounded-full font-mono text-[9px] tracking-[0.2em] transition-colors ${
+            !liveSel ? 'bg-white/[0.09] text-slate-200' : 'text-slate-500 hover:text-slate-300'}`}>
+          SIM
+        </button>
+      </div>
+      <span aria-live="polite"
+        className={`ml-auto font-mono text-[8.5px] tracking-[0.12em] truncate ${noteAmber ? 'text-[#D8A24B]/80' : 'text-slate-500'}`}>
+        {note}
+      </span>
+    </div>
+  );
+}
+
+/* =====================================================================
+ * LEGEND — color ramp, severity key, live city mean marker
+ * (rendered inside the left instrument column, below the scrubber)
+ * ===================================================================== */
+function Legend({ snap, selectedId }) {
+  const pct = clamp((snap.mean - T_MIN) / (T_MAX - T_MIN) * 100, 2, 98);
+  const alertOn = snap.peak && snap.peak.temp >= ALERT_T;
+  return (
+    <div className="glass rounded-lg p-3.5 sm:p-4 w-[196px] sm:w-[218px] select-none">
+      <div className="flex items-baseline justify-between">
+        <span className="font-mono text-[9px] tracking-[0.24em] text-slate-500">SURFACE TEMP</span>
+        <span className="font-mono text-[9px] text-slate-600">°C</span>
+      </div>
+      <div className="relative mt-2.5 h-[7px] rounded-full" style={{ background: RAMP_CSS }}>
+        <span className="caret absolute -top-[3px] h-[13px] w-[2px] rounded-full bg-white/90" style={{ left: `calc(${pct.toFixed(1)}% - 1px)` }}/>
+      </div>
+      <div className="mt-1.5 flex justify-between font-mono text-[9px] text-slate-500 tabular-nums">
+        <span>30</span><span>35</span><span>40</span><span>45</span>
+      </div>
+      <div className="hidden sm:block mt-3.5 pt-3 border-t border-white/[0.06] space-y-[7px]">
+        {Object.keys(SEV).map(k => {
+          const s = SEV[k];
+          return (
+            <div key={k} className="flex items-center gap-2">
+              <span className="w-[7px] h-[7px] rounded-full shrink-0" style={{ background: s.color }}/>
+              <span className="font-mono text-[9px] tracking-[0.16em] text-slate-400">{s.label}</span>
+              <span className="ml-auto font-mono text-[9px] text-slate-600">{s.range}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 pt-2.5 border-t border-white/[0.06]">
+        <p className={`font-mono text-[8.5px] tracking-[0.12em] ${alertOn ? 'text-[#E0522E]' : 'text-slate-500'}`}>
+          {`MEAN ${snap.mean.toFixed(1)}° · PEAK ${snap.peak.temp.toFixed(1)}°${alertOn ? ' · ALERT' : ''}`}
+        </p>
+        <p className="mt-[3px] font-mono text-[8.5px] tracking-[0.12em] text-slate-600">
+          {snap.scrubbed
+            ? `${snap.source === 'live' ? 'FORECAST' : 'MODEL'} ${hhmm(snap.hour)} — NOT LIVE`
+            : snap.source === 'live'
+              ? (snap.stale ? `LIVE STALLED · LAST ${snap.updated}` : `LIVE · OPEN-METEO · ${snap.updated}`)
+              : 'SIMULATED — NOT LIVE DATA'}
+        </p>
+        {!selectedId && <p className="mt-2 font-mono text-[8.5px] tracking-[0.12em] text-slate-500">SELECT A DISTRICT FOR READOUT</p>}
+      </div>
+    </div>
+  );
+}
+
+/* =====================================================================
+ * 24-HOUR SCRUBBER — the timeline IS the temperature curve.
+ * Drag (or arrow-key) through the day; the handle is a probe riding the
+ * city-mean curve (real forecast in live mode, diurnal model in sim),
+ * colored by the mean temperature at that hour. A hairline marks real
+ * NOW; returning to NOW is always one click (or Escape) away.
+ * ===================================================================== */
+const TICKS = [[0, 1], [3, 0], [6, 1], [9, 0], [12, 1], [15, 0], [18, 1], [21, 0], [24, 1]];
+const HOURS = [[0, '00'], [6, '06'], [12, '12'], [18, '18'], [24, '24']];
+
+function TimeScrubber({ view, liveHour, dataT, scrubbed, playing, reduced, onScrub, onLive, onPlaying }) {
+  const trackRef = useRef(null);
+  const dragRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+
+  const hour = view.hour;
+  const pct = clamp(hour / 24, 0, 1) * 100;
+  const nowPct = clamp(liveHour / 24, 0, 1) * 100;
+  const probe = rampColor(view.mean);
+
+  // city-mean curve at scrub positions 0..24 — recomputed when the active
+  // provider or its data changes (real forecast vs simulated model)
+  const curve = useMemo(() => {
+    const ts = SOURCE.meanCurve();
+    const lo = Math.min(...ts) - 0.4, hi = Math.max(...ts) + 0.4;
+    const Y = t => 30 - ((t - lo) / (hi - lo)) * 22;
+    const line = ts.map((t, i) => `${i ? 'L' : 'M'}${((i / (ts.length - 1)) * 100).toFixed(2)} ${Y(t).toFixed(2)}`).join('');
+    return { ts, lo, hi, line, area: `${line}L100 30L0 30Z` };
+  }, [view.source, dataT]);
+
+  // handle rides the curve: y position = mean temperature at `hour`
+  const hi2 = clamp(hour, 0, 24) * 2;
+  const i0 = Math.min(Math.floor(hi2), curve.ts.length - 2);
+  const tAt = curve.ts[i0] + (curve.ts[i0 + 1] - curve.ts[i0]) * (hi2 - i0);
+  const yAt = 30 - ((tAt - curve.lo) / (curve.hi - curve.lo)) * 22;
+
+  const scrubTo = clientX => {
+    const el = trackRef.current; if (!el) return;
+    const r = el.getBoundingClientRect();
+    onScrub(clamp((clientX - r.left) / r.width, 0, 1) * 24);
+  };
+
+  const onPointerDown = e => {
+    if (dragRef.current) return; // ignore extra fingers mid-drag
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    const el = trackRef.current; if (!el) return;
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    dragRef.current = true; setDragging(true);
+    scrubTo(e.clientX);
+  };
+  const onPointerMove = e => { if (dragRef.current) scrubTo(e.clientX); };
+  const endDrag = () => { dragRef.current = false; setDragging(false); };
+
+  const onKeyDown = e => {
+    const step = e.shiftKey ? 1 : 0.25; // arrows: ±15 min, shift: ±1 h
+    let h;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') h = hour + step;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') h = hour - step;
+    else if (e.key === 'Home') h = 0;
+    else if (e.key === 'End') h = 24 - QH;
+    else if (e.key === 'Escape') { onLive(); return; }
+    else return;
+    e.preventDefault();
+    onScrub(h);
+  };
+
+  return (
+    <div className="scrubber-bar glass rounded-full flex items-center gap-1.5 sm:gap-2 h-[54px] pl-1.5 pr-2 sm:pr-3 select-none pointer-events-auto">
+      <button type="button" onClick={() => onPlaying(!playing)} aria-pressed={playing}
+        aria-label={playing ? 'Pause the 24-hour thermal cycle' : 'Play the 24-hour thermal cycle'}
+        className="shrink-0 w-[34px] h-[34px] rounded-full flex items-center justify-center text-slate-400 hover:text-slate-100 hover:bg-white/[0.07] transition-colors">
+        <I n={playing ? 'pause' : 'play'} size={12}/>
+      </button>
+
+      <div ref={trackRef} role="slider" tabIndex={0}
+        aria-label="24-hour thermal timeline — drag or use arrow keys, hold Shift for hour steps"
+        aria-valuemin={0} aria-valuemax={24} aria-valuenow={+hour.toFixed(2)}
+        aria-valuetext={`${hhmm(hour)} local time, city mean ${view.mean.toFixed(1)} degrees Celsius`}
+        onKeyDown={onKeyDown}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+        onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={endDrag}
+        className="relative flex-1 min-w-0 h-[38px] cursor-ew-resize touch-none">
+
+        <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 38" preserveAspectRatio="none" aria-hidden="true">
+          <path d={curve.area} fill="rgba(216,162,75,0.08)"/>
+          <path d={curve.line} fill="none" stroke="rgba(216,162,75,0.5)" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
+          <line x1="0" y1="30" x2="100" y2="30" stroke="rgba(255,255,255,0.12)" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
+          {TICKS.map(([h, maj]) => (
+            <line key={h} x1={(h / 24 * 100).toFixed(2)} y1="30" x2={(h / 24 * 100).toFixed(2)}
+              y2={maj ? '26.5' : '28.2'} stroke={`rgba(255,255,255,${maj ? 0.3 : 0.13})`}
+              strokeWidth="1" vectorEffect="non-scaling-stroke"/>
+          ))}
+        </svg>
+
+        {HOURS.map(([h, l]) => (
+          <span key={h} className="absolute font-mono text-[7.5px] text-slate-500 tabular-nums pointer-events-none"
+            style={{ left: `${(h / 24 * 100).toFixed(2)}%`, top: 31,
+              transform: h === 0 ? 'none' : h === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}>{l}</span>
+        ))}
+
+        {/* real-time NOW hairline — in live mode it also marks the seam where
+            "later today" (right) hands off to "tomorrow's small hours" (left) */}
+        <span className="absolute pointer-events-none" style={{ left: `${nowPct.toFixed(2)}%`, top: 6, height: 24, width: 1, background: 'rgba(238,243,248,0.25)' }}/>
+        {scrubbed && Math.abs(hour - liveHour) > 0.75 && (
+          <span className="absolute font-mono text-[7px] tracking-[0.14em] text-slate-500 pointer-events-none"
+            style={{ left: `calc(${nowPct.toFixed(2)}% + 4px)`, top: 2 }}>NOW</span>
+        )}
+
+        {/* the probe handle — colored by the mean temperature at this hour */}
+        <span className="absolute pointer-events-none rounded-full" style={{
+          left: `${pct.toFixed(2)}%`, top: yAt.toFixed(1), width: 12, height: 12,
+          transform: 'translate(-50%, -50%)',
+          background: probe,
+          boxShadow: `0 0 0 2px #070B10, 0 0 0 3px rgba(255,255,255,0.55), 0 0 12px 2px ${rgba(probe, 0.35)}`,
+          transition: (reduced || dragging || scrubbed || playing) ? 'none' : 'left 1.2s linear',
+        }}/>
+      </div>
+
+      <div className="shrink-0 text-right leading-none pl-0.5">
+        <p className="font-mono text-[13px] text-slate-200 tabular-nums">{hhmm(hour)}</p>
+        <p className="mt-[5px] font-mono text-[7.5px] tracking-[0.24em] text-slate-500">
+          {scrubbed ? (view.source === 'live' ? 'FCST' : 'MODEL') : 'NOW'}
+        </p>
+      </div>
+
+      <div className="shrink-0 text-right leading-none hidden sm:block pl-3 border-l border-white/[0.07]">
+        <p className="font-mono text-[13px] tabular-nums" style={{ color: probe }}>{view.mean.toFixed(1)}°</p>
+        <p className="mt-[5px] font-mono text-[7.5px] tracking-[0.24em] text-slate-500">MEAN</p>
+      </div>
+
+      {scrubbed && (
+        <button type="button" onClick={onLive}
+          className="shrink-0 h-[30px] px-2.5 rounded-full border border-[#D8A24B]/40 text-[#D8A24B] hover:bg-[#D8A24B]/10 flex items-center gap-1.5 font-mono text-[8.5px] tracking-[0.18em] transition-colors">
+          <I n="live" size={10}/> LIVE
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* =====================================================================
+ * DISTRICT PANEL — slides in from the right (bottom sheet on mobile)
+ * ===================================================================== */
+function Sparkline({ g, rec, hour }) {
+  const W = 280, H = 66, P = 8;
+  const pts = SOURCE.modelCurve(g, hour, rec.tw);
+  const min = Math.min(...pts), max = Math.max(...pts);
+  const lo = min - 0.5, hi = max + 0.5;
+  const X = i => P + (W - 2 * P) * i / (pts.length - 1);
+  const Y = v => H - P - (H - 2 * P) * (v - lo) / (hi - lo);
+  const line = pts.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join('');
+  const area = `${line}L${(W - P).toFixed(1)} ${(H - 3).toFixed(1)}L${P} ${(H - 3).toFixed(1)}Z`;
+  const c = rampColor(rec.temp);
+  const cx = X(pts.length - 1), cy = Y(pts[pts.length - 1]);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block" aria-hidden="true">
+      <path d={area} fill={c} opacity="0.13"/>
+      <line x1={P} y1={H - 3} x2={W - P} y2={H - 3} stroke="rgba(255,255,255,0.09)" strokeWidth="1"/>
+      <path d={line} fill="none" stroke={c} strokeWidth="1.4" strokeLinejoin="round"/>
+      <line x1={cx} y1={cy} x2={cx} y2={H - 3} stroke="rgba(255,255,255,0.22)" strokeWidth="1" strokeDasharray="2 4"/>
+      <circle cx={cx} cy={cy} r="6" fill="none" stroke={c} opacity="0.35"/>
+      <circle cx={cx} cy={cy} r="2.8" fill={c}/>
+      <text x={P} y={11} className="svg-mono" fontSize="8" fill="#7C8A9C">MAX {max.toFixed(1)}°</text>
+      <text x={W - P} y={11} textAnchor="end" className="svg-mono" fontSize="8" fill="#7C8A9C">MIN {min.toFixed(1)}°</text>
+    </svg>
+  );
+}
+
+function InfoPanel({ snap, selectedId, onClose, onLive }) {
+  const open = !!selectedId;
+  const [lastId, setLastId] = useState(null);
+  useEffect(() => { if (selectedId) setLastId(selectedId); }, [selectedId]);
+  const ref = useRef(null);
+  useEffect(() => { if (open && ref.current) ref.current.focus({ preventScroll: true }); }, [open, selectedId]);
+
+  const id = open ? selectedId : lastId; // keep content during slide-out
+  const g = id ? GEO_BY_ID[id] : null;
+  const rec = (id && snap.byId[id]) || null;
+  const sev = rec ? SEV[rec.sev] : null;
+  const trend = rec ? rec.trend : 0;
+  const close = () => { onClose(); if (id && HIT_EL[id]) HIT_EL[id].focus(); };
+
+  const rows = rec ? [
+    { icon: 'thermo',  label: 'FEELS LIKE', value: `${rec.feels.toFixed(1)}°C` },
+    { icon: 'droplet', label: 'HUMIDITY',   value: `${rec.rh}%` },
+    { icon: 'wind',    label: 'WIND',       value: `${rec.windDir} · ${rec.wind} KM/H` },
+    { icon: SKY_ICON[rec.sky] || 'sun', label: 'SKY', value: rec.sky.toUpperCase() },
+  ] : [];
+
+  return (
+    <aside ref={ref} tabIndex={-1} role="dialog" aria-label="District readout" aria-hidden={!open}
+      onKeyDown={e => { if (e.key === 'Escape') close(); }}
+      className={`panel glass fixed z-50 rounded-xl inset-x-3 bottom-3 max-h-[66dvh] md:inset-x-auto md:right-5 md:top-[88px] md:bottom-5 md:max-h-none md:w-[336px] ${open ? '' : 'closed'}`}>
+      {rec && g && (
+        <div className="h-full overflow-y-auto scroll-thin p-5 sm:p-6 pb-7">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h2 className="text-[19px] font-medium tracking-tight text-slate-100 leading-tight">{g.name}</h2>
+              <p className="font-ar text-[15px] text-slate-400 mt-1" dir="rtl" lang="ar">{g.ar}</p>
+            </div>
+            <button type="button" onClick={close} aria-label="Close district panel"
+              className="shrink-0 rounded-md p-1.5 text-slate-500 hover:text-slate-200 hover:bg-white/[0.06] transition-colors">
+              <I n="close" size={15}/>
+            </button>
+          </div>
+          <p className="mt-2.5 font-mono text-[9px] tracking-[0.16em] text-slate-500">
+            {g.lat.toFixed(3)}° N · {g.lng.toFixed(3)}° E — DISTRICT READOUT
+          </p>
+
+          <div className="mt-5 flex items-end gap-2">
+            <span className="font-mono text-[46px] leading-[0.9] font-medium tabular-nums" style={{ color: rampColor(rec.temp) }}>{rec.temp.toFixed(1)}</span>
+            <span className="font-mono text-[13px] text-slate-500 mb-1.5">°C</span>
+            <span className="ml-auto mb-1 inline-flex items-center gap-1 font-mono text-[10px] tabular-nums"
+              style={{ color: trend > 0.15 ? '#E0904A' : (trend < -0.15 ? '#6FA7BE' : '#7C8A9C') }}>
+              {trend > 0.15 ? <I n="chevup" size={11}/> : trend < -0.15 ? <I n="chevdown" size={11}/> : <I n="steady" size={11}/>}
+              {Math.abs(trend).toFixed(1)}°/H
+            </span>
+          </div>
+
+          <div className="mt-3.5">
+            <div className="inline-flex items-center gap-2 rounded-full border px-3 py-[6px]"
+              style={{ borderColor: sev.color + '59', color: sev.color, background: sev.color + '14' }}>
+              <span className="w-[6px] h-[6px] rounded-full" style={{ background: sev.color }}/>
+              <span className="font-mono text-[10px] tracking-[0.22em]">{sev.label}</span>
+            </div>
+          </div>
+
+          <div className="mt-6">
+            <div className="flex items-baseline justify-between">
+              <span className="font-mono text-[9px] tracking-[0.22em] text-slate-500">
+                {snap.source === 'live' ? 'FORECAST · 24H' : 'THERMAL MODEL · 24H'}
+              </span>
+              <span className="font-mono text-[9px] text-slate-600">
+                {snap.scrubbed ? 'SCRUB ' : 'LOCAL '}{hhmm(snap.hour)}
+              </span>
+            </div>
+            <div className="mt-2"><Sparkline g={g} rec={rec} hour={snap.hour}/></div>
+            <div className="flex justify-between font-mono text-[8px] text-slate-600 mt-1">
+              <span>−24H</span><span>{snap.scrubbed ? hhmm(snap.hour) : 'NOW'}</span>
+            </div>
+          </div>
+
+          <div className="mt-6 divide-y divide-white/[0.06] border-y border-white/[0.06]">
+            {rows.map(r => (
+              <div key={r.label} className="flex items-center gap-3 py-[11px]">
+                <I n={r.icon} className="text-slate-600 shrink-0" size={14}/>
+                <span className="font-mono text-[9.5px] tracking-[0.2em] text-slate-500">{r.label}</span>
+                <span className="flex-1 border-b border-dotted border-white/[0.08] -translate-y-[3px]"/>
+                <span className="font-mono text-[12px] text-slate-200">{r.value}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 pt-4 border-t border-white/[0.06]">
+            <p className="font-mono text-[9px] text-slate-500 tracking-[0.14em]">
+              {snap.scrubbed
+                ? `${snap.source === 'live' ? 'FORECAST' : 'MODEL'} PROJECTION · ${hhmm(snap.hour)} AST`
+                : snap.source === 'live'
+                  ? (snap.stale ? `FEED STALLED · LAST ${snap.updated} AST` : `OPEN-METEO · UPDATED ${snap.updated} AST`)
+                  : `FEED UPDATED ${snap.updated} AST`}
+            </p>
+            <p className="mt-1 font-mono text-[9px] text-slate-600 tracking-[0.14em]">
+              {snap.scrubbed
+                ? (snap.source === 'live' ? 'OPEN-METEO HOURLY FORECAST — NOT LIVE' : '24H SCRUB VIEW — SIMULATED MODEL')
+                : snap.source === 'live'
+                  ? 'LIVE · 2 M AIR TEMP — NOT SATELLITE LST'
+                  : 'SIMULATED MODEL — NOT LIVE OBSERVATIONS'}
+            </p>
+            {snap.scrubbed && (
+              <button type="button" onClick={onLive}
+                className="mt-3 inline-flex items-center gap-1.5 font-mono text-[9px] tracking-[0.18em] text-[#D8A24B] border border-[#D8A24B]/40 hover:bg-[#D8A24B]/10 rounded-full px-2.5 py-1.5 transition-colors">
+                <I n="live" size={10}/> RETURN TO LIVE
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </aside>
+  );
+}
+
+/* =====================================================================
+ * APP
+ * ===================================================================== */
+function App() {
+  const liveSnap = useSyncExternalStore(SOURCE.subscribe, SOURCE.getSnapshot);
+  const feed = liveSnap.feed;
+  const [selectedId, setSelectedId] = useState(null);
+  const [ping, setPing] = useState(null);
+  const [scrubHour, setScrubHour] = useState(null); // null → live; [0,24) → 24h scrub view
+  const [playing, setPlaying] = useState(false);
+  const reduced = useReducedMotion();
+  const clock = useRiyadhClock();
+
+  const liveHourRef = useRef(liveSnap.hour); liveHourRef.current = liveSnap.hour;
+
+  // the view every component consumes: live snapshot, or the active
+  // provider (real forecast or simulated model) at the scrub hour
+  const view = scrubHour == null ? liveSnap : SOURCE.project(scrubHour);
+
+  // extreme-heat early-warning scan: only while viewing live (not scrubbed),
+  // recomputed whenever the active feed advances
+  const ahead = useMemo(
+    () => (scrubHour == null ? SOURCE.nextExtreme(ALERT_T) : null),
+    [liveSnap, scrubHour == null]
+  );
+  const [alertToast, dismissAlert] = useExtremeAlert(view, ahead, playing);
+
+  // playback: a full 24h cycle in ~14 s (discrete 30-min steps if motion is reduced)
+  useEffect(() => {
+    if (!playing) return;
+    if (reduced) {
+      const iv = setInterval(() => setScrubHour(h => qz((h ?? liveHourRef.current) + 0.5)), 400);
+      return () => clearInterval(iv);
+    }
+    let raf = 0, last = performance.now();
+    const SPEED = 24 / 14; // hours per second
+    const loop = t => {
+      const dt = Math.min((t - last) / 1000, 0.1); last = t;
+      setScrubHour(h => qz((h ?? liveHourRef.current) + dt * SPEED));
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, reduced]);
+
+  const handleSelect = useCallback((id) => {
+    setSelectedId(id);
+    if (id && !reduced) setPing({ id, at: Date.now() }); else setPing(null);
+  }, [reduced]);
+
+  const handleScrubTime = useCallback((h) => { setPlaying(false); setScrubHour(qz(h)); }, []);
+  const handleLive = useCallback(() => { setPlaying(false); setScrubHour(null); }, []);
+  const handleMode = useCallback((m) => { SOURCE.setMode(m); }, []);
+
+  // toast "click to view": jump to the warned district — and, for forecast
+  // alerts, to the exact warned hour on the 24 h timeline
+  const handleToastView = useCallback((a) => {
+    dismissAlert(a.key);
+    setPlaying(false);
+    handleSelect(a.districtId);
+    if (a.kind === 'ahead' || a.kind === 'scrub') setScrubHour(qz(a.hour));
+    else handleLive();
+  }, [dismissAlert, handleSelect, handleLive]);
+
+  return (
+    <div className="h-full">
+      <div className={`map-wrap fixed inset-0 z-0 flex items-center justify-center ${selectedId ? 'panel-open' : ''}`}>
+        <MapSvg snap={view} selectedId={selectedId} ping={ping} onSelect={handleSelect}/>
+      </div>
+      <TopBar clock={clock} snap={view} onSelect={handleSelect} feed={feed}
+        model={scrubHour == null ? null : hhmm(scrubHour)}/>
+
+      {/* left instrument column: source toggle, 24h scrubber, legend */}
+      <div className="fixed left-3 bottom-3 sm:left-5 sm:bottom-5 z-40 flex flex-col items-start gap-3 pointer-events-none">
+        <SourceToggle feed={feed} updated={liveSnap.updated} onMode={handleMode}/>
+        <TimeScrubber view={view} liveHour={liveSnap.hour} dataT={liveSnap.t} scrubbed={scrubHour != null}
+          playing={playing} reduced={reduced}
+          onScrub={handleScrubTime} onLive={handleLive} onPlaying={setPlaying}/>
+        <Legend snap={view} selectedId={selectedId}/>
+      </div>
+
+      {/* extreme-heat alert toast — top-center below the header, shifts
+          clear of the readout panel on desktop like the map does */}
+      <div className={`toast-layer fixed inset-0 z-[65] flex justify-center items-start pointer-events-none pt-[136px] sm:pt-[92px] ${selectedId ? 'panel-open' : ''}`}>
+        {alertToast && <ExtremeToast alert={alertToast} onDismiss={dismissAlert} onView={handleToastView}/>}
+      </div>
+
+      <InfoPanel snap={view} selectedId={selectedId} onClose={() => setSelectedId(null)} onLive={handleLive}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
