@@ -26,7 +26,7 @@ body{margin:0;background:#070B10;color:#C7D0DC;font-family:'Space Grotesk',sans-
 .hitcircle{cursor:pointer;touch-action:manipulation}
 .hitcircle:focus,.hitcircle:focus-visible{outline:none}
 .scrubber-bar{width:calc(100vw - 24px)}
-@media (min-width:640px){.scrubber-bar{width:min(420px,calc(100vw - 400px))}}
+@media (min-width:768px){.scrubber-bar{width:min(420px,calc(100vw - 400px))}}
 @keyframes breathe{from{transform:scale(1)}to{transform:scale(1.05)}}
 .blob{transform-box:fill-box;transform-origin:center;animation:breathe 8s ease-in-out infinite alternate}
 @keyframes livepulse{0%{box-shadow:0 0 0 0 rgba(216,162,75,.5)}70%{box-shadow:0 0 0 7px rgba(216,162,75,0)}100%{box-shadow:0 0 0 0 rgba(216,162,75,0)}}
@@ -55,6 +55,35 @@ body{margin:0;background:#070B10;color:#C7D0DC;font-family:'Space Grotesk',sans-
 .col-body.off{transform:translateY(14px)}
 .col-mini.off{transform:translateY(10px)}
 @media (min-width:640px){.col-mini{display:none!important}.col-body{opacity:1!important;transform:none!important;visibility:visible!important}}
+/* ---- PORTRAIT MOBILE FLOW LAYOUT (<768px) ----
+   The fixed dashboard becomes a normal vertically-scrolling document:
+   header → status/clock → search → map (62dvh hero) → source toggle →
+   scrubber → legend → credit. Overlays (district sheet, alerts, zoom
+   pill) stay viewport-anchored. Desktop (≥768) is completely untouched:
+   every rule below is scoped to max-width:767px. No transform-scaling,
+   no font shrinking (the input rule ENLARGES to 16px to stop iOS focus
+   zoom). !important beats Tailwind utility ordering. */
+@media (max-width:767px){
+html,body{height:auto!important}
+body{overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior-y:none;-webkit-tap-highlight-color:transparent}
+.topbar{position:static!important;padding-bottom:10px}
+.mapflow{position:static!important;display:block!important;width:100%;height:min(62vh,calc(100vw*5/3));height:min(62dvh,calc(100vw*5/3));overflow:hidden!important}
+.colwrap{position:static!important;width:100%;padding:14px 12px 4px}
+.col-body{position:static!important;max-height:none!important;overflow:visible!important}
+.colchev{position:static!important}
+.col-mini{position:static!important}
+.scrubber-bar{width:100%!important}
+.scrubtrack{touch-action:pan-y!important}
+.legendbox{width:100%!important}
+.toastlayer{padding-top:14px!important}
+.creditflow{position:static!important;text-align:right;padding:10px 14px 18px}
+input[type=text]{font-size:16px!important}
+}
+/* mobile collapse (chevron exists only <640): swap visibility instantly */
+@media (max-width:639px){
+.col-body.off{display:none}
+.col-mini.off{display:none}
+}
 body::after{content:"";position:fixed;inset:0;z-index:100;pointer-events:none;opacity:.045;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E")}
 @media (prefers-reduced-motion:reduce){.blob,.live-dot,.ping-ring,.sel-ring,.toast-in{animation:none!important}.caret,.panel,.map-wrap,.toast-layer,.col-body,.col-mini,.credit{transition:none!important}}
 </style>
@@ -556,6 +585,16 @@ return () => m.removeEventListener('change', f);
 }, []);
 return r;
 }
+function useMediaQuery(q) {
+const [m, setM] = useState(() => !!(window.matchMedia && window.matchMedia(q).matches));
+useEffect(() => {
+const mq = window.matchMedia(q);
+const f = e => setM(e.matches);
+mq.addEventListener('change', f);
+return () => mq.removeEventListener('change', f);
+}, [q]);
+return m;
+}
 function labelPos(g) {
 const s = g.lp || 'b', dx = g.ldx || 0, dy = g.ldy || 0;
 if (s === 'a') return { x: g.x + dx, y: g.y - g.r * 0.78 - 7 + dy, a: 'middle' };
@@ -676,7 +715,7 @@ onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); onDismiss(alert
 <p className="mt-[5px] flex items-baseline gap-1.5 min-w-0">
 <span className="text-[13px] text-slate-100 truncate">{g.name}</span>
 <span className="font-mono text-[13px] tabular-nums shrink-0" style={{ color: rampColor(alert.temp) }}>{alert.temp.toFixed(1)}°C</span>
-<span className="font-mono text-[8px] tracking-[0.16em] text-slate-500 shrink-0">CLICK TO VIEW</span>
+<span className="font-mono text-[8px] tracking-[0.16em] text-slate-500 shrink-0">TAP TO VIEW</span>
 </p>
 </div>
 </button>
@@ -707,6 +746,10 @@ const dragMoved = useRef(false);
 const lastTap = useRef({ t: 0, x: 0, y: 0 });
 const animRaf = useRef(0);
 const isCoarse = useMemo(() => !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches), []);
+/* flow layout (<768px): at 1x the map yields vertical swipes to the page
+   (touch-action pan-y) while pinches/taps still arrive here; zoomed in it
+   reclaims full gesture control (none). Desktop stays 'none' always. */
+const flow = useMediaQuery('(max-width: 767px)');
 const applyVp = v => {
 vpRef.current = v;
 if (!writeRaf.current) {
@@ -941,7 +984,8 @@ return (
 <>
 <svg ref={svgRef} viewBox="0 0 600 1000" preserveAspectRatio="xMidYMid meet" role="group"
 aria-label={`${snap.source === 'live' ? 'Live' : 'Simulated'} satellite-style heat map of Riyadh districts${zoomed ? ` — zoomed to ${zoomUi.toFixed(1)} times` : ''}`}
-className="h-full w-full select-none" style={{ overflow: 'visible', touchAction: 'none' }}
+className="h-full w-full select-none"
+style={{ overflow: 'visible', touchAction: (flow && !zoomed) ? 'pan-y' : 'none' }}
 onPointerDown={onSvgPointerDown} onClick={onSvgClick}>
 <defs>
 <filter id="heatBlur" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="6.5"/></filter>
@@ -1108,7 +1152,7 @@ const subtitle = model != null
 ? (feed.liveStatus === 'connecting' ? 'SIMULATED · CONNECTING TO LIVE' : 'SIMULATED · LIVE UNAVAILABLE')
 : 'SIMULATED FEED';
 return (
-<header className="fixed top-0 inset-x-0 z-[60] pointer-events-none">
+<header className="topbar fixed top-0 inset-x-0 z-[60] pointer-events-none">
 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 px-4 sm:px-7 pt-4">
 <div className="pointer-events-auto">
 <div className="flex items-center gap-2.5">
@@ -1164,7 +1208,7 @@ function Legend({ snap, selectedId }) {
 const pct = clamp((snap.mean - T_MIN) / (T_MAX - T_MIN) * 100, 2, 98);
 const alertOn = snap.peak && snap.peak.temp >= ALERT_T;
 return (
-<div className="glass rounded-lg p-3.5 sm:p-4 w-[196px] sm:w-[218px] select-none">
+<div className="legendbox glass rounded-lg p-3.5 sm:p-4 w-[196px] sm:w-[218px] select-none">
 <div className="flex items-baseline justify-between">
 <span className="font-mono text-[9px] tracking-[0.24em] text-slate-500">SURFACE TEMP</span>
 <span className="font-mono text-[9px] text-slate-600">°C</span>
@@ -1175,7 +1219,7 @@ return (
 <div className="mt-1.5 flex justify-between font-mono text-[9px] text-slate-500 tabular-nums">
 <span>30</span><span>35</span><span>40</span><span>45</span>
 </div>
-<div className="hidden sm:block mt-3.5 pt-3 border-t border-white/[0.06] space-y-[7px]">
+<div className="mt-3.5 pt-3 border-t border-white/[0.06] space-y-[7px]">
 {Object.keys(SEV).map(k => {
 const s = SEV[k];
 return (
@@ -1198,7 +1242,7 @@ return (
 ? (snap.stale ? `LIVE STALLED · LAST ${snap.updated}` : `LIVE · OPEN-METEO · ${snap.updated}`)
 : 'SIMULATED — NOT LIVE DATA'}
 </p>
-{!selectedId && <p className="mt-2 font-mono text-[8.5px] tracking-[0.12em] text-slate-500">SELECT A DISTRICT FOR READOUT</p>}
+{!selectedId && <p className="mt-2 font-mono text-[8.5px] tracking-[0.12em] text-slate-500">TAP A DISTRICT FOR READOUT</p>}
 </div>
 </div>
 );
@@ -1267,7 +1311,7 @@ aria-valuetext={`${hhmm(hour)} local time, city mean ${view.mean.toFixed(1)} deg
 onKeyDown={onKeyDown}
 onPointerDown={onPointerDown} onPointerMove={onPointerMove}
 onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={endDrag}
-className="relative flex-1 min-w-0 h-[38px] cursor-ew-resize touch-none">
+className="scrubtrack relative flex-1 min-w-0 h-[38px] cursor-ew-resize touch-none">
 <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 38" preserveAspectRatio="none" aria-hidden="true">
 <path d={curve.area} fill="rgba(216,162,75,0.08)"/>
 <path d={curve.line} fill="none" stroke="rgba(216,162,75,0.5)" strokeWidth="1.4" vectorEffect="non-scaling-stroke"/>
@@ -1376,14 +1420,14 @@ return (
 onKeyDown={e => { if (e.key === 'Escape') close(); }}
 className={`panel glass fixed z-50 rounded-xl inset-x-3 bottom-3 max-h-[66dvh] md:inset-x-auto md:right-5 md:top-[88px] md:bottom-5 md:max-h-none md:w-[336px] ${open ? '' : 'closed'}`}>
 {rec && g && (
-<div className="h-full overflow-y-auto scroll-thin p-5 sm:p-6 pb-7">
+<div className="h-full overflow-y-auto scroll-thin overscroll-contain p-5 sm:p-6 pb-7">
 <div className="flex items-start justify-between gap-4">
 <div className="min-w-0">
 <h2 className="text-[19px] font-medium tracking-tight text-slate-100 leading-tight">{g.name}</h2>
 <p className="font-ar text-[15px] text-slate-400 mt-1" dir="rtl" lang="ar">{g.ar}</p>
 </div>
 <button type="button" onClick={close} aria-label="Close district panel"
-className="shrink-0 rounded-md p-1.5 text-slate-500 hover:text-slate-200 hover:bg-white/[0.06] transition-colors">
+className="shrink-0 rounded-md p-2 text-slate-500 hover:text-slate-200 hover:bg-white/[0.06] transition-colors">
 <I n="close" size={15}/>
 </button>
 </div>
@@ -1493,6 +1537,13 @@ const ahead = useMemo(
 () => (scrubHour == null ? SOURCE.nextExtreme(ALERT_T) : null),
 [liveSnap, scrubHour == null]);
 const [alertToast, dismissAlert] = useExtremeAlert(view, ahead, playing);
+/* portrait flow layout: lock page scroll while the district sheet is open */
+useEffect(() => {
+if (!selectedId || !window.matchMedia('(max-width: 767px)').matches) return;
+const prev = document.body.style.overflow;
+document.body.style.overflow = 'hidden';
+return () => { document.body.style.overflow = prev; };
+}, [selectedId]);
 useEffect(() => {
 if (!playing) return;
 if (reduced) {
@@ -1525,12 +1576,12 @@ else handleLive();
 }, [dismissAlert, handleSelect, handleLive]);
 return (
 <div className="h-full">
-<div className={`map-wrap fixed inset-0 z-0 flex items-center justify-center ${selectedId ? 'panel-open' : ''}`}>
-<MapSvg snap={view} selectedId={selectedId} ping={ping} onSelect={handleSelect} reduced={reduced}/>
-</div>
 <TopBar clock={clock} snap={view} onSelect={handleSelect} feed={feed}
 model={scrubHour == null ? null : hhmm(scrubHour)}/>
-<div className="fixed left-3 bottom-3 sm:left-5 sm:bottom-5 z-40 pointer-events-none">
+<div className={`mapflow map-wrap fixed inset-0 z-0 flex items-center justify-center ${selectedId ? 'panel-open' : ''}`}>
+<MapSvg snap={view} selectedId={selectedId} ping={ping} onSelect={handleSelect} reduced={reduced}/>
+</div>
+<div className="colwrap fixed left-3 bottom-3 sm:left-5 sm:bottom-5 z-40 pointer-events-none">
 <div className={`col-mini ${colMin ? '' : 'off'}`}>
 <button type="button" onClick={() => setColMin(false)} aria-expanded="false"
 aria-label="Expand instrument panel"
@@ -1548,7 +1599,7 @@ className="pointer-events-auto glass rounded-full h-[44px] pl-4 pr-3 flex items-
 <div className={`col-body ${colMin ? 'off' : ''} flex flex-col items-start gap-3 max-h-[calc(100dvh-140px)] overflow-y-auto overscroll-contain scroll-thin pointer-events-auto sm:pointer-events-none`}>
 <button type="button" onClick={() => setColMin(true)} aria-expanded="true"
 aria-label="Collapse instrument panel"
-className="sm:hidden sticky top-0 z-10 self-end pointer-events-auto w-[44px] h-[44px] rounded-full glass flex items-center justify-center text-slate-400 hover:text-slate-100 transition-colors">
+className="colchev sm:hidden self-end pointer-events-auto w-[44px] h-[44px] rounded-full glass flex items-center justify-center text-slate-400 hover:text-slate-100 transition-colors">
 <I n="chevdown" size={16}/>
 </button>
 <SourceToggle feed={feed} updated={liveSnap.updated} onMode={handleMode}/>
@@ -1558,10 +1609,10 @@ onScrub={handleScrubTime} onLive={handleLive} onPlaying={setPlaying}/>
 <Legend snap={view} selectedId={selectedId}/>
 </div>
 </div>
-<div className={`toast-layer fixed inset-0 z-[65] flex justify-center items-start pointer-events-none pt-[136px] sm:pt-[92px] ${selectedId ? 'panel-open' : ''}`}>
+<div className={`toastlayer toast-layer fixed inset-0 z-[65] flex justify-center items-start pointer-events-none pt-[136px] sm:pt-[92px] ${selectedId ? 'panel-open' : ''}`}>
 {alertToast && <ExtremeToast alert={alertToast} onDismiss={dismissAlert} onView={handleToastView}/>}
 </div>
-<p className={`credit fixed right-3 bottom-3 sm:right-5 sm:bottom-5 z-30 font-mono text-[9px] tracking-[0.22em] text-slate-600 select-none ${selectedId ? 'panel-open' : ''}`}>
+<p className={`creditflow credit fixed right-3 bottom-3 sm:right-5 sm:bottom-5 z-30 font-mono text-[9px] tracking-[0.22em] text-slate-600 select-none ${selectedId ? 'panel-open' : ''}`}>
 MADE BY MESH3AL
 </p>
 <InfoPanel snap={view} selectedId={selectedId} onClose={() => setSelectedId(null)} onLive={handleLive}/>
