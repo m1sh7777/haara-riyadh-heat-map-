@@ -1,4 +1,4 @@
-# Haara (حارة) — Riyadh Heat Map
+# Haara (حارة) Riyadh Heat Map
 
 A minimalist, satellite-style live heat map of Riyadh showing real-time surface temperature and weather conditions across the city's districts.
 
